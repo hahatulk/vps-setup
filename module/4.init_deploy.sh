@@ -5,8 +5,8 @@ echo "Starting Deploy project setup..."
 read -p "Deploy username (default: deploy): " username
 username=${username:-deploy}
 
-read -p "Project name (default: test-project): " project
-project=${project:-test-project}
+read -p "Project name (default: nginx-proxy-manager): " project
+project=${project:-nginx-proxy-manager}
 
 if ! id -u "$username" > /dev/null 2>&1; then
 	sudo useradd -m "$username"
@@ -14,15 +14,15 @@ if ! id -u "$username" > /dev/null 2>&1; then
 	sudo groupadd "$username"
 	sudo usermod -a -G "$username" "$username"
 
-	sudo mkdir -p /home/"$username"/.ssh 
+	sudo mkdir -p /home/"$username"/.ssh
 	sudo chmod 700 /home/"$username"/.ssh
-	
+
 	if [ ! -f /home/"$username"/.ssh/authorized_keys ]; then
 		sudo touch /home/"$username"/.ssh/authorized_keys
 		sudo chmod 600 /home/"$username"/.ssh/authorized_keys
 		sudo chown -R "$username":"$username" /home/"$username"/.ssh
 	fi
-	
+
 	sudo usermod -s /bin/bash "$username"
 fi
 
