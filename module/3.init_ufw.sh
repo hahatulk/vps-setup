@@ -27,5 +27,7 @@ sudo ufw enable
 
 sudo ufw status verbose
 
+sudo systemctl restart ufw
+
 echo "UFW setup completed."
 echo "To delete a rule: sudo ufw status numbered; sudo ufw delete <number>"
