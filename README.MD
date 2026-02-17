@@ -34,3 +34,8 @@ bash ./module/3.init_ufw.sh
 ```bash
 bash ./module/4.init_deploy.sh
 ```
+
+# Бан IP
+```bash
+bash ban.sh
+```
