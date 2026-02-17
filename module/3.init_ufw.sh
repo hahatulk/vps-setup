@@ -19,7 +19,7 @@ sudo ufw allow ftp
 sudo ufw default deny incoming
 sudo ufw default allow outgoing
 
-sudo cp ../ufw-docker /usr/local/bin/ufw-docker
+sudo cp ./ufw-docker /usr/local/bin/ufw-docker
 sudo chmod +x /usr/local/bin/ufw-docker
 sudo ufw-docker install
 
