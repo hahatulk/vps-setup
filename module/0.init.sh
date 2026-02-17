@@ -27,8 +27,4 @@ sudo systemctl start fail2ban
 sudo systemctl enable fail2ban
 sudo systemctl status fail2ban
 
-sudo mkdir -p /var/docker
-sudo mkdir -p /var/docker/scripts
-sudo git clone https://github.com/hahatulk/vps-setup.git /var/docker/scripts/vps-setup
-
 echo "VPS SETTING completed."
