@@ -22,9 +22,4 @@ EOF
 sudo apt update
 sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
 
-sudo apt install fail2ban -y
-sudo systemctl start fail2ban
-sudo systemctl enable fail2ban
-sudo systemctl status fail2ban
-
 echo "VPS SETTING completed."

@@ -1,0 +1,22 @@
+[DEFAULT]
+bantime   = 1h
+findtime  = 10m
+maxretry  = 3
+banaction = ufw
+backend   = auto
+
+[sshd]
+enabled  = true
+port     = 2001
+mode     = aggressive
+maxretry = 3
+findtime = 10m
+bantime  = 1h
+
+[recidive]
+enabled  = true
+filter   = recidive
+logpath  = /var/log/fail2ban.log
+maxretry = 3
+findtime = 1d
+bantime  = 7d

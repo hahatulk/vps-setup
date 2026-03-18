@@ -29,5 +29,13 @@ sudo ufw status verbose
 
 sudo systemctl restart ufw
 
+sudo apt install fail2ban -y
+
+sudo cp ./fail2ban/jail.local /etc/fail2ban/jail.local
+
+sudo systemctl start fail2ban
+sudo systemctl enable fail2ban
+sudo systemctl status fail2ban
+
 echo "UFW setup completed."
 echo "To delete a rule: sudo ufw status numbered; sudo ufw delete <number>"
