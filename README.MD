@@ -39,3 +39,8 @@ bash ./module/4.init_deploy.sh
 ```bash
 bash ban.sh
 ```
+
+# Аудит безопасности VPS
+```bash
+bash audit.sh
+```
