@@ -30,12 +30,9 @@ if ! id -u "$username" > /dev/null 2>&1; then
 	fi
 
 	sudo mkdir -p /home/"$username"/.ssh 
-	sudo chmod 700 /home/"$username"/.ssh
 	
 	if [ ! -f /home/"$username"/.ssh/authorized_keys ]; then
 		sudo touch /home/"$username"/.ssh/authorized_keys
-		sudo chmod 600 /home/"$username"/.ssh/authorized_keys
-		sudo chown -R "$username":"$username" /home/"$username"/.ssh
 	fi
 	
 	echo "Add SSH KEY? (y/n):"
@@ -51,5 +48,9 @@ if ! id -u "$username" > /dev/null 2>&1; then
 
 	sudo usermod -s /bin/bash "$username"
 fi
+
+sudo chmod 700 /home/"$username"/.ssh
+sudo chmod 600 /home/"$username"/.ssh/authorized_keys
+sudo chown -R "$username":"$username" /home/"$username"/.ssh
 
 echo "User setup completed."
