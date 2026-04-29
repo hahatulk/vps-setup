@@ -22,4 +22,8 @@ EOF
 sudo apt update
 sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
 
+# Оставить только последние 2 недели + уменьшить до 300 МБ
+sudo journalctl --vacuum-time=2weeks
+sudo journalctl --vacuum-size=300M
+
 echo "VPS SETTING completed."
