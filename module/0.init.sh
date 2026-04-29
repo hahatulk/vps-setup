@@ -22,8 +22,14 @@ EOF
 sudo apt update
 sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
 
-# Оставить только последние 2 недели + уменьшить до 300 МБ
-sudo journalctl --vacuum-time=2weeks
-sudo journalctl --vacuum-size=300M
+# Оставить только последние 2 недели + уменьшить до 500 МБ
+sudo mkdir -p /etc/systemd/journald.conf.d
+cat <<EOF | sudo tee /etc/systemd/journald.conf.d/size.conf
+[Journal]
+SystemMaxUse=500M
+RuntimeMaxUse=200M
+EOF
+
+sudo systemctl restart systemd-journald
 
 echo "VPS SETTING completed."
