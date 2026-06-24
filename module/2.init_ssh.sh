@@ -16,5 +16,6 @@ if ! sudo sshd -t; then
 fi
 
 sudo systemctl restart ssh
+sudo systemctl restart sshd
 
 echo "SSH config completed successfully."
