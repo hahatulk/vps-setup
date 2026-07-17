@@ -55,3 +55,18 @@ bash backup-docker.sh
 bash restore-docker.sh
 ```
 
+# Отключение бесполезного containerd
+
+```bash
+nano /etc/docker/daemon.json
+```
+```
+{
+    "features": {
+        "containerd-snapshotter": false
+    }
+}
+```
+```bash
+sudo systemctl restart docker
+```
