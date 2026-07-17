@@ -44,3 +44,14 @@ bash ban.sh
 ```bash
 bash audit.sh
 ```
+
+# Бекап docker app, положить в папку с docker-compose.yml
+```bash
+bash backup-docker.sh
+```
+
+# Восстановление docker app из бекапа, положить в папку с docker-compose.yml
+```bash
+bash restore-docker.sh
+```
+
