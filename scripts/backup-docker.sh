@@ -15,27 +15,36 @@ echo "=================================================="
 # =============================================
 echo "→ Бэкапим Bind Mounts (локальные папки):"
 
-# Основной способ — парсим docker compose config
-docker compose config 2>/dev/null | grep -E '^\s+-\s' | grep ':' | while read -r line; do
-    host_path=$(echo "$line" | awk -F: '{gsub(/^[ \t-]+/,"",$1); print $1}')
-    if [ -n "$host_path" ] && [ -d "$host_path" ]; then
+BIND_COUNT=0
+
+# Способ 1: docker compose config
+while IFS= read -r line; do
+    host_path=$(echo "$line" | sed 's/^[[:space:]]*-*[[:space:]]*//' | cut -d':' -f1 | xargs -r)
+    if [[ -n "$host_path" && -d "$host_path" ]]; then
+        BIND_COUNT=$((BIND_COUNT + 1))
         folder_name=$(basename "$host_path")
-        echo "   • $host_path  →  bind_${folder_name}.tar.gz"
+        echo "   • $host_path → bind_${folder_name}.tar.gz"
         tar -czf "$BACKUP_DIR/bind_${folder_name}.tar.gz" -C "$(dirname "$host_path")" "$folder_name" || \
         echo "     [!] Ошибка бэкапа $host_path"
     fi
-done
+done < <(docker compose config 2>/dev/null | grep -E '^\s+-\s' | grep ':')
 
-# Fallback — если выше ничего не нашёл
-if [ -z "$(ls "$BACKUP_DIR"/bind_*.tar.gz 2>/dev/null)" ]; then
-    echo "   Используем fallback поиск папок..."
-    for dir in data db redis postgres uptime-kuma-data *.data; do
-        if [ -d "./$dir" ]; then
-            echo "   • ./$dir"
-            tar -czf "$BACKUP_DIR/bind_${dir}.tar.gz" "./$dir"
+# Способ 2: Прямой парсинг yml (если первый не сработал)
+if [[ $BIND_COUNT -eq 0 ]]; then
+    echo "   Пробуем прямой парсинг docker-compose.yml..."
+    while IFS= read -r line; do
+        host_path=$(echo "$line" | sed 's/^[[:space:]]*-*[[:space:]]*//' | cut -d':' -f1 | xargs -r)
+        if [[ -n "$host_path" && -d "$host_path" ]]; then
+            BIND_COUNT=$((BIND_COUNT + 1))
+            folder_name=$(basename "$host_path")
+            echo "   • $host_path → bind_${folder_name}.tar.gz"
+            tar -czf "$BACKUP_DIR/bind_${folder_name}.tar.gz" -C "$(dirname "$host_path")" "$folder_name" || \
+            echo "     [!] Ошибка бэкапа $host_path"
         fi
-    done
+    done < <(grep -E '^\s+-\s' docker-compose.yml | grep ':')
 fi
+
+echo "   Найдено bind mounts: $BIND_COUNT"
 
 # =============================================
 # 2. Named Volumes
@@ -57,10 +66,10 @@ done
 # =============================================
 echo "→ Бэкапим Images:"
 docker compose config --images 2>/dev/null | sort | uniq | while read -r image; do
-    if [ -n "$image" ]; then
+    if [ -n "$image" ] && [ "$image" != "null" ]; then
         safe_name=$(echo "$image" | tr '/:' '_')
         echo "   • $image"
-        docker pull "$image" >/dev/null 2>&1
+        docker pull "$image" >/dev/null 2>&1 || true
         docker save "$image" -o "$BACKUP_DIR/image_${safe_name}.tar"
         size=$(du -sh "$BACKUP_DIR/image_${safe_name}.tar" 2>/dev/null | awk '{print $1}')
         echo "     ✓ $size"
@@ -70,10 +79,11 @@ done
 # =============================================
 # 4. Конфиги
 # =============================================
-cp docker-compose.yml "$BACKUP_DIR/" 2>/dev/null
-[ -f ".env" ] && cp .env "$BACKUP_DIR/" 2>/dev/null
+echo "→ Копируем конфиги..."
+cp docker-compose.yml "$BACKUP_DIR/" 2>/dev/null || true
+[ -f ".env" ] && cp .env "$BACKUP_DIR/" 2>/dev/null || true
 
 echo "=================================================="
 echo "✅ Бэкап завершён!"
-du -sh "$BACKUP_DIR"
+echo "Размер: $(du -sh "$BACKUP_DIR" | awk '{print $1}')"
 ls -lh "$BACKUP_DIR"
