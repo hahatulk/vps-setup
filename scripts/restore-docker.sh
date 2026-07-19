@@ -69,20 +69,25 @@ echo "→ Восстанавливаем Named Volumes:"
 
 for file in "$BACKUP_DIR"/volume_*_backup.tar.gz; do
     if [ -f "$file" ]; then
-        vol=$(basename "$file" .tar.gz | sed 's/^volume_//' | sed 's/_backup$//')
+        # Из имени файла достаём короткое имя volume (vw-data)
+        vol=$(basename "$file" .tar.gz)
+        vol=${vol#volume_}          # убираем volume_
+        vol=${vol%_backup}          # убираем _backup
 
-        # Ищем реальное имя volume
+        # Сначала ищем существующий volume с этим именем (с префиксом или без)
         REAL_VOL=$(docker volume ls -q | grep -E "(^|_)${vol}$" | head -n 1)
 
+        # Если не нашли — создаём с префиксом проекта
         if [[ -z "$REAL_VOL" ]]; then
             REAL_VOL="${PROJECT_NAME}_${vol}"
             echo "   • Создаём volume: $REAL_VOL"
             docker volume create "$REAL_VOL" >/dev/null
         else
-            echo "   • Volume: $vol → $REAL_VOL"
+            echo "   • Используем существующий volume: $REAL_VOL"
         fi
 
-        # Универсальная версия твоей команды
+        echo "   • Восстанавливаем $vol → $REAL_VOL"
+
         docker run --rm \
           -v "${REAL_VOL}:/data" \
           -v "$(pwd)/$BACKUP_DIR:/backup:ro" \
