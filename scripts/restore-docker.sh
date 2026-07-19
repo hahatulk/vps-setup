@@ -7,11 +7,11 @@ echo "=== Docker Project Restore ==="
 echo "Проект: $PROJECT_NAME"
 echo "=================================================="
 
-# Автоматически выбираем самый свежий бэкап
+# Выбираем самый свежий бэкап
 LATEST_BACKUP=$(ls -1 "$BACKUP_ROOT/$PROJECT_NAME/" 2>/dev/null | sort -r | head -n 1)
 
 if [ -z "$LATEST_BACKUP" ]; then
-    echo "❌ Ошибка: Бэкапы не найдены в $BACKUP_ROOT/$PROJECT_NAME/"
+    echo "❌ Бэкапы не найдены в $BACKUP_ROOT/$PROJECT_NAME/"
     exit 1
 fi
 
@@ -21,6 +21,7 @@ read -p "Восстановить этот бэкап? (Y/n): " confirm
 if [[ "$confirm" =~ ^[Nn]$ ]]; then
     echo "Доступные бэкапы:"
     ls -1 "$BACKUP_ROOT/$PROJECT_NAME/" | sort -r
+    BACKUP_DATE="$LATEST_BACKUP"
     read -p "Введите имя папки бэкапа: " BACKUP_DATE
 else
     BACKUP_DATE="$LATEST_BACKUP"
@@ -29,55 +30,72 @@ fi
 BACKUP_DIR="$BACKUP_ROOT/$PROJECT_NAME/$BACKUP_DATE"
 
 if [ ! -d "$BACKUP_DIR" ]; then
-    echo "❌ Ошибка: Папка бэкапа $BACKUP_DIR не найдена!"
+    echo "❌ Папка бэкапа $BACKUP_DIR не найдена!"
     exit 1
 fi
 
 echo "Восстанавливаем из: $BACKUP_DIR"
 echo "=================================================="
 
-# Предупреждение
-read -p "⚠️  Остановить все контейнеры проекта перед восстановлением? (Y/n): " stop_confirm
+# Останавливаем контейнеры
+read -p "Остановить контейнеры перед восстановлением? (Y/n): " stop_confirm
 if [[ ! "$stop_confirm" =~ ^[Nn]$ ]]; then
     echo "🛑 Останавливаем контейнеры..."
-    docker compose down --remove-orphans
+    docker compose stop
 fi
 
+# =============================================
 # 1. Восстановление Bind Mounts
-echo "→ Восстанавливаем Bind Mounts (локальные папки):"
+# =============================================
+echo "→ Восстанавливаем Bind Mounts:"
+
 for file in "$BACKUP_DIR"/bind_*.tar.gz; do
     if [ -f "$file" ]; then
         folder=$(basename "$file" .tar.gz | sed 's/^bind_//')
         echo "   • ./$folder"
-        mkdir -p "./$folder"
 
-        # Очищаем перед восстановлением
-        rm -rf "./$folder"/*
+        mkdir -p "./$folder"
+        rm -rf "./$folder"/* "./$folder"/.[!.]* 2>/dev/null || true
 
         tar -xzf "$file" -C "./$folder" --strip-components=1 2>/dev/null && \
         echo "     ✓ Восстановлено" || echo "     [!] Ошибка восстановления $folder"
     fi
 done
 
+# =============================================
 # 2. Восстановление Named Volumes
+# =============================================
 echo "→ Восстанавливаем Named Volumes:"
-for file in "$BACKUP_DIR"/volume_*.tar.gz; do
+
+for file in "$BACKUP_DIR"/volume_*_backup.tar.gz; do
     if [ -f "$file" ]; then
-        vol_name=$(basename "$file" .tar.gz | sed 's/^volume_//')
-        echo "   • Volume: $vol_name"
+        vol=$(basename "$file" .tar.gz | sed 's/^volume_//' | sed 's/_backup$//')
 
-        docker volume create "$vol_name" >/dev/null 2>&1 || true
+        # Ищем реальное имя volume
+        REAL_VOL=$(docker volume ls -q | grep -E "(^|_)${vol}$" | head -n 1)
 
+        if [[ -z "$REAL_VOL" ]]; then
+            REAL_VOL="${PROJECT_NAME}_${vol}"
+            echo "   • Создаём volume: $REAL_VOL"
+            docker volume create "$REAL_VOL" >/dev/null
+        else
+            echo "   • Volume: $vol → $REAL_VOL"
+        fi
+
+        # Универсальная версия твоей команды
         docker run --rm \
-            -v "$vol_name":/data \
-            -v "$(pwd)/$BACKUP_DIR":/backup \
-            alpine:3.18 sh -c "rm -rf /data/* 2>/dev/null && tar -xzf /backup/$(basename "$file") -C /data" && \
-        echo "     ✓ Восстановлено" || echo "     [!] Ошибка восстановления $vol_name"
+          -v "${REAL_VOL}:/data" \
+          -v "$(pwd)/$BACKUP_DIR:/backup:ro" \
+          alpine sh -c "rm -rf /data/* /data/.[!.]* 2>/dev/null; tar xzvf /backup/$(basename "$file") -C /data" && \
+        echo "     ✓ Восстановлено" || echo "     [!] Ошибка восстановления $vol"
     fi
 done
 
+# =============================================
 # 3. Загрузка Images
-echo "→ Загружаем Docker Images:"
+# =============================================
+echo "→ Загружаем Images:"
+
 for file in "$BACKUP_DIR"/image_*.tar; do
     if [ -f "$file" ]; then
         echo "   • $(basename "$file")"
@@ -85,7 +103,9 @@ for file in "$BACKUP_DIR"/image_*.tar; do
     fi
 done
 
+# =============================================
 # 4. Конфиги
+# =============================================
 echo "→ Восстанавливаем конфиги..."
 cp -f "$BACKUP_DIR/docker-compose.yml" ./ 2>/dev/null && echo "   ✓ docker-compose.yml"
 [ -f "$BACKUP_DIR/.env" ] && cp -f "$BACKUP_DIR/.env" ./ 2>/dev/null && echo "   ✓ .env"
@@ -93,5 +113,3 @@ cp -f "$BACKUP_DIR/docker-compose.yml" ./ 2>/dev/null && echo "   ✓ docker-com
 echo "=================================================="
 echo "✅ Восстановление завершено!"
 echo ""
-echo "Рекомендуется выполнить:"
-echo "   docker compose up -d"

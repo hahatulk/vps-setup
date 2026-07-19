@@ -11,55 +11,65 @@ echo "Бэкап в: $BACKUP_DIR"
 echo "=================================================="
 
 # =============================================
-# 1. Bind Mounts — локальные папки
+# 1. Bind Mounts
 # =============================================
-echo "→ Бэкапим Bind Mounts (локальные папки):"
+echo "→ Бэкапим Bind Mounts:"
 
 BIND_COUNT=0
 
-# Способ 1: docker compose config
 while IFS= read -r line; do
-    host_path=$(echo "$line" | sed 's/^[[:space:]]*-*[[:space:]]*//' | cut -d':' -f1 | xargs -r)
+    host_path=$(echo "$line" | sed 's/^[ \t-]*//' | cut -d':' -f1)
+    # убираем лишние пробелы без xargs
+    host_path="${host_path#"${host_path%%[![:space:]]*}"}"
+    host_path="${host_path%"${host_path##*[![:space:]]}"}"
+
     if [[ -n "$host_path" && -d "$host_path" ]]; then
         BIND_COUNT=$((BIND_COUNT + 1))
-        folder_name=$(basename "$host_path")
-        echo "   • $host_path → bind_${folder_name}.tar.gz"
-        tar -czf "$BACKUP_DIR/bind_${folder_name}.tar.gz" -C "$(dirname "$host_path")" "$folder_name" || \
-        echo "     [!] Ошибка бэкапа $host_path"
+        name=$(basename "$host_path")
+        echo "   • $host_path → bind_${name}.tar.gz"
+        tar -czf "$BACKUP_DIR/bind_${name}.tar.gz" -C "$(dirname "$host_path")" "$name" || echo "     [!] Ошибка"
     fi
-done < <(docker compose config 2>/dev/null | grep -E '^\s+-\s' | grep ':')
-
-# Способ 2: Прямой парсинг yml (если первый не сработал)
-if [[ $BIND_COUNT -eq 0 ]]; then
-    echo "   Пробуем прямой парсинг docker-compose.yml..."
-    while IFS= read -r line; do
-        host_path=$(echo "$line" | sed 's/^[[:space:]]*-*[[:space:]]*//' | cut -d':' -f1 | xargs -r)
-        if [[ -n "$host_path" && -d "$host_path" ]]; then
-            BIND_COUNT=$((BIND_COUNT + 1))
-            folder_name=$(basename "$host_path")
-            echo "   • $host_path → bind_${folder_name}.tar.gz"
-            tar -czf "$BACKUP_DIR/bind_${folder_name}.tar.gz" -C "$(dirname "$host_path")" "$folder_name" || \
-            echo "     [!] Ошибка бэкапа $host_path"
-        fi
-    done < <(grep -E '^\s+-\s' docker-compose.yml | grep ':')
-fi
+done < <(grep -E '^\s+-\s' docker-compose.yml 2>/dev/null | grep ':')
 
 echo "   Найдено bind mounts: $BIND_COUNT"
 
 # =============================================
-# 2. Named Volumes
+# 2. Named Volumes (универсально)
 # =============================================
 echo "→ Бэкапим Named Volumes:"
-docker compose config --volumes 2>/dev/null | while read -r vol; do
-    if [ -n "$vol" ]; then
-        echo "   • Volume: $vol"
+
+VOLUME_COUNT=0
+
+for vol in $(docker compose config --volumes 2>/dev/null); do
+    if [[ -n "$vol" ]]; then
+        # Ищем реальное имя volume (с префиксом проекта или без)
+        REAL_VOL=$(docker volume ls -q | grep -E "(^|_)${vol}$" | head -n 1)
+
+        if [[ -z "$REAL_VOL" ]]; then
+            REAL_VOL="$vol"
+        fi
+
+        VOLUME_COUNT=$((VOLUME_COUNT + 1))
+        echo "   • Volume: $vol → $REAL_VOL"
+
+        BACKUP_FILE="$BACKUP_DIR/volume_${vol}_backup.tar.gz"
+
         docker run --rm \
-            -v "$vol":/data:ro \
-            -v "$(pwd)/$BACKUP_DIR":/backup \
-            alpine:3.18 tar -czf "/backup/volume_${vol}.tar.gz" -C /data . || \
-            echo "     [!] Не удалось volume $vol"
+          -v "${REAL_VOL}:/volume_data:ro" \
+          -v "$(pwd)/$BACKUP_DIR:/backup" \
+          alpine tar czf "/backup/volume_${vol}_backup.tar.gz" -C /volume_data . || \
+          echo "     [!] Ошибка бэкапа $REAL_VOL"
+
+        size=$(du -sh "$BACKUP_FILE" 2>/dev/null | awk '{print $1}' || echo "0")
+        echo "     ✓ $size"
     fi
 done
+
+if [ "$VOLUME_COUNT" -eq 0 ]; then
+    echo "   Named volumes не найдены"
+else
+    echo "   Всего named volumes: $VOLUME_COUNT"
+fi
 
 # =============================================
 # 3. Images
