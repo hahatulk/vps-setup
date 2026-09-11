@@ -1,10 +1,33 @@
 #!/bin/bash
 
+# =============================================
+# Настройки
+# =============================================
+# Кастомное имя compose-файла (как в скрипте бэкапа)
+COMPOSE_FILE_NAME="docker-compose.yml"
+
 BACKUP_ROOT="./backups"
 PROJECT_NAME=$(basename "$(pwd)")
 
+# Если указанный файл не существует — автопоиск
+COMPOSE="$COMPOSE_FILE_NAME"
+if [[ ! -f "$COMPOSE" ]]; then
+    for f in compose.yml compose.yaml docker-compose.yml docker-compose.yaml; do
+        if [[ -f "$f" ]]; then
+            COMPOSE="$f"
+            break
+        fi
+    done
+fi
+
+DC=(docker compose)
+if [[ -n "$COMPOSE" && -f "$COMPOSE" ]]; then
+    DC=(docker compose -f "$COMPOSE")
+fi
+
 echo "=== Docker Project Restore ==="
 echo "Проект: $PROJECT_NAME"
+echo "Compose: ${COMPOSE:-не найден (будет восстановлен из бэкапа)}"
 echo "=================================================="
 
 # Выбираем самый свежий бэкап
@@ -41,7 +64,7 @@ echo "=================================================="
 read -p "Остановить контейнеры перед восстановлением? (Y/n): " stop_confirm
 if [[ ! "$stop_confirm" =~ ^[Nn]$ ]]; then
     echo "🛑 Останавливаем контейнеры..."
-    docker compose stop
+    "${DC[@]}" stop 2>/dev/null || docker compose stop 2>/dev/null || true
 fi
 
 # =============================================
@@ -112,7 +135,22 @@ done
 # 4. Конфиги
 # =============================================
 echo "→ Восстанавливаем конфиги..."
-cp -f "$BACKUP_DIR/docker-compose.yml" ./ 2>/dev/null && echo "   ✓ docker-compose.yml"
+
+# Сначала целевое имя из настроек, иначе любой compose из бэкапа
+RESTORED_COMPOSE=""
+if [ -f "$BACKUP_DIR/$COMPOSE_FILE_NAME" ]; then
+    cp -f "$BACKUP_DIR/$COMPOSE_FILE_NAME" "./$COMPOSE_FILE_NAME" && \
+        echo "   ✓ $COMPOSE_FILE_NAME" && RESTORED_COMPOSE="$COMPOSE_FILE_NAME"
+else
+    for f in compose.yml compose.yaml docker-compose.yml docker-compose.yaml; do
+        if [ -f "$BACKUP_DIR/$f" ]; then
+            dest="${COMPOSE_FILE_NAME:-$f}"
+            cp -f "$BACKUP_DIR/$f" "./$dest" && echo "   ✓ $dest" && RESTORED_COMPOSE="$dest"
+            break
+        fi
+    done
+fi
+
 [ -f "$BACKUP_DIR/.env" ] && cp -f "$BACKUP_DIR/.env" ./ 2>/dev/null && echo "   ✓ .env"
 
 echo "=================================================="
