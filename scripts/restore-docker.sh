@@ -1,33 +1,10 @@
 #!/bin/bash
 
-# =============================================
-# Настройки
-# =============================================
-# Кастомное имя compose-файла (как в скрипте бэкапа)
-COMPOSE_FILE_NAME="docker-compose.yml"
-
 BACKUP_ROOT="./backups"
 PROJECT_NAME=$(basename "$(pwd)")
 
-# Если указанный файл не существует — автопоиск
-COMPOSE="$COMPOSE_FILE_NAME"
-if [[ ! -f "$COMPOSE" ]]; then
-    for f in compose.yml compose.yaml docker-compose.yml docker-compose.yaml; do
-        if [[ -f "$f" ]]; then
-            COMPOSE="$f"
-            break
-        fi
-    done
-fi
-
-DC=(docker compose)
-if [[ -n "$COMPOSE" && -f "$COMPOSE" ]]; then
-    DC=(docker compose -f "$COMPOSE")
-fi
-
 echo "=== Docker Project Restore ==="
 echo "Проект: $PROJECT_NAME"
-echo "Compose: ${COMPOSE:-не найден (будет восстановлен из бэкапа)}"
 echo "=================================================="
 
 # Выбираем самый свежий бэкап
@@ -44,7 +21,6 @@ read -p "Восстановить этот бэкап? (Y/n): " confirm
 if [[ "$confirm" =~ ^[Nn]$ ]]; then
     echo "Доступные бэкапы:"
     ls -1 "$BACKUP_ROOT/$PROJECT_NAME/" | sort -r
-    BACKUP_DATE="$LATEST_BACKUP"
     read -p "Введите имя папки бэкапа: " BACKUP_DATE
 else
     BACKUP_DATE="$LATEST_BACKUP"
@@ -57,14 +33,51 @@ if [ ! -d "$BACKUP_DIR" ]; then
     exit 1
 fi
 
+# Имя compose из бэкапа или из текущей папки
+SAVED_COMPOSE=""
+[ -f "$BACKUP_DIR/.compose_filename" ] && SAVED_COMPOSE=$(cat "$BACKUP_DIR/.compose_filename")
+
+DEFAULT_COMPOSE="$SAVED_COMPOSE"
+if [[ -z "$DEFAULT_COMPOSE" ]]; then
+    for f in compose.yml compose.yaml docker-compose.yml docker-compose.yaml; do
+        if [[ -f "$f" || -f "$BACKUP_DIR/$f" ]]; then
+            DEFAULT_COMPOSE="$f"
+            break
+        fi
+    done
+fi
+
+echo
+echo "Compose-файлы в бэкапе:"
+ls -1 "$BACKUP_DIR"/*.yml "$BACKUP_DIR"/*.yaml 2>/dev/null || echo "  (нет)"
+echo
+
+if [[ -n "$DEFAULT_COMPOSE" ]]; then
+    read -p "Имя compose-файла [$DEFAULT_COMPOSE]: " COMPOSE
+    COMPOSE="${COMPOSE:-$DEFAULT_COMPOSE}"
+else
+    read -p "Имя compose-файла: " COMPOSE
+fi
+
+if [[ -z "$COMPOSE" ]]; then
+    echo "❌ Имя compose-файла не задано"
+    exit 1
+fi
+
+DC=(docker compose -f "$COMPOSE")
+
 echo "Восстанавливаем из: $BACKUP_DIR"
+echo "Compose: $COMPOSE"
 echo "=================================================="
 
-# Останавливаем контейнеры
 read -p "Остановить контейнеры перед восстановлением? (Y/n): " stop_confirm
 if [[ ! "$stop_confirm" =~ ^[Nn]$ ]]; then
     echo "🛑 Останавливаем контейнеры..."
-    "${DC[@]}" stop 2>/dev/null || docker compose stop 2>/dev/null || true
+    if [[ -f "$COMPOSE" ]]; then
+        "${DC[@]}" stop
+    else
+        docker compose stop 2>/dev/null || true
+    fi
 fi
 
 # =============================================
@@ -137,21 +150,23 @@ done
 echo "→ Восстанавливаем конфиги..."
 
 # Сначала целевое имя из настроек, иначе любой compose из бэкапа
-RESTORED_COMPOSE=""
-if [ -f "$BACKUP_DIR/$COMPOSE_FILE_NAME" ]; then
-    cp -f "$BACKUP_DIR/$COMPOSE_FILE_NAME" "./$COMPOSE_FILE_NAME" && \
-        echo "   ✓ $COMPOSE_FILE_NAME" && RESTORED_COMPOSE="$COMPOSE_FILE_NAME"
+if [ -f "$BACKUP_DIR/$COMPOSE" ]; then
+    cp -f "$BACKUP_DIR/$COMPOSE" "./$COMPOSE" && echo "   ✓ $COMPOSE"
+elif [ -n "$SAVED_COMPOSE" ] && [ -f "$BACKUP_DIR/$SAVED_COMPOSE" ]; then
+    cp -f "$BACKUP_DIR/$SAVED_COMPOSE" "./$COMPOSE" && echo "   ✓ $COMPOSE (из $SAVED_COMPOSE)"
 else
+    found=""
     for f in compose.yml compose.yaml docker-compose.yml docker-compose.yaml; do
         if [ -f "$BACKUP_DIR/$f" ]; then
-            dest="${COMPOSE_FILE_NAME:-$f}"
-            cp -f "$BACKUP_DIR/$f" "./$dest" && echo "   ✓ $dest" && RESTORED_COMPOSE="$dest"
+            cp -f "$BACKUP_DIR/$f" "./$COMPOSE" && echo "   ✓ $COMPOSE (из $f)"
+            found=1
             break
         fi
     done
+    [ -z "$found" ] && echo "   [!] Compose-файл в бэкапе не найден"
 fi
 
-[ -f "$BACKUP_DIR/.env" ] && cp -f "$BACKUP_DIR/.env" ./ 2>/dev/null && echo "   ✓ .env"
+[ -f "$BACKUP_DIR/.env" ] && cp -f "$BACKUP_DIR/.env" ./ && echo "   ✓ .env"
 
 echo "=================================================="
 echo "✅ Восстановление завершено!"

@@ -1,44 +1,34 @@
 #!/bin/bash
-set -euo pipefail
-
-# =============================================
-# Настройки
-# =============================================
-# Кастомное имя compose-файла.
-# Можно указать относительный путь: compose.prod.yml
-# или полный: /opt/app/docker-compose.custom.yml
-# Пусто = автопоиск (compose.yml / compose.yaml / docker-compose.yml / docker-compose.yaml)
-COMPOSE_FILE_NAME="docker-compose.yml"
 
 PROJECT_NAME=$(basename "$(pwd)")
 DATE=$(date +%Y-%m-%d_%H-%M)
 BACKUP_DIR="./backups/$PROJECT_NAME/$DATE"
 
-# --- определяем compose-файл ---
-COMPOSE=""
-if [[ -n "${COMPOSE_FILE_NAME:-}" && -f "$COMPOSE_FILE_NAME" ]]; then
-    COMPOSE="$COMPOSE_FILE_NAME"
-elif [[ -n "${COMPOSE_FILE:-}" ]]; then
-    IFS=':' read -ra _cf <<< "$COMPOSE_FILE"
-    for f in "${_cf[@]}"; do
-        if [[ -f "$f" ]]; then
-            COMPOSE="$f"
-            break
-        fi
-    done
-fi
+echo "=== Полный Docker Backup ==="
+echo "Проект: $PROJECT_NAME"
 
-if [[ -z "$COMPOSE" ]]; then
-    for f in compose.yml compose.yaml docker-compose.yml docker-compose.yaml; do
-        if [[ -f "$f" ]]; then
-            COMPOSE="$f"
-            break
-        fi
-    done
+# Ищем стандартные файлы, чтобы подсказать дефолт
+DEFAULT_COMPOSE=""
+for f in compose.yml compose.yaml docker-compose.yml docker-compose.yaml; do
+    if [[ -f "$f" ]]; then
+        DEFAULT_COMPOSE="$f"
+        break
+    fi
+done
+
+echo "Найденные compose-файлы:"
+ls -1 compose.yml compose.yaml docker-compose.yml docker-compose.yaml *.yml *.yaml 2>/dev/null | sort -u
+echo
+
+if [[ -n "$DEFAULT_COMPOSE" ]]; then
+    read -p "Имя compose-файла [$DEFAULT_COMPOSE]: " COMPOSE
+    COMPOSE="${COMPOSE:-$DEFAULT_COMPOSE}"
+else
+    read -p "Имя compose-файла: " COMPOSE
 fi
 
 if [[ -z "$COMPOSE" || ! -f "$COMPOSE" ]]; then
-    echo "❌ Compose-файл не найден. Задайте COMPOSE_FILE_NAME в начале скрипта."
+    echo "❌ Файл '$COMPOSE' не найден"
     exit 1
 fi
 
@@ -118,6 +108,7 @@ done
 # =============================================
 echo "→ Копируем конфиги..."
 cp "$COMPOSE" "$BACKUP_DIR/" 2>/dev/null || true
+echo "$COMPOSE" > "$BACKUP_DIR/.compose_filename"
 [ -f ".env" ] && cp .env "$BACKUP_DIR/" 2>/dev/null || true
 
 echo "=================================================="
