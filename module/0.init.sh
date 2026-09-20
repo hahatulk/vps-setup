@@ -5,8 +5,8 @@
 
 echo "Starting VPS SETTING..."
 
-sudo apt update
-sudo apt install ca-certificates curl -y
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y ca-certificates curl ufw fail2ban
 sudo install -m 0755 -d /etc/apt/keyrings
 sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
 sudo chmod a+r /etc/apt/keyrings/docker.asc
@@ -21,5 +21,15 @@ EOF
 
 sudo apt update
 sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
+
+# Оставить только последние 2 недели + уменьшить до 500 МБ
+sudo mkdir -p /etc/systemd/journald.conf.d
+cat <<EOF | sudo tee /etc/systemd/journald.conf.d/size.conf
+[Journal]
+SystemMaxUse=500M
+RuntimeMaxUse=200M
+EOF
+
+sudo systemctl restart systemd-journald
 
 echo "VPS SETTING completed."

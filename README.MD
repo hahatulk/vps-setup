@@ -39,3 +39,34 @@ bash ./module/4.init_deploy.sh
 ```bash
 bash ban.sh
 ```
+
+# Аудит безопасности VPS
+```bash
+bash audit.sh
+```
+
+# Бекап docker app, положить в папку с docker-compose.yml
+```bash
+bash backup-docker.sh
+```
+
+# Восстановление docker app из бекапа, положить в папку с docker-compose.yml
+```bash
+bash restore-docker.sh
+```
+
+# Отключение бесполезного containerd
+
+```bash
+nano /etc/docker/daemon.json
+```
+```
+{
+    "features": {
+        "containerd-snapshotter": false
+    }
+}
+```
+```bash
+sudo systemctl restart docker
+```

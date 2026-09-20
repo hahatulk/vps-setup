@@ -1,11 +1,21 @@
 #!/bin/bash
-# Script for SSH config section
-# This configures SSH with interactive input
+
 echo "Starting SSH config..."
 
-sudo rm -rf /etc/ssh/sshd_config.d/50-cloud-init.conf
-sudo cp sshd_config.d/10-custom.conf /etc/ssh/sshd_config.d/10.custom.conf
+# Удаляем облачный конфиг (если есть)
+sudo rm -f /etc/ssh/sshd_config.d/50-cloud-init.conf
+
+# Копируем наш улучшенный конфиг
+sudo cp sshd_config.d/99.custom.conf /etc/ssh/sshd_config.d/99.custom.conf
+sudo chmod 644 /etc/ssh/sshd_config.d/99.custom.conf
+
+# Проверка конфига
+if ! sudo sshd -t; then
+  echo "ERROR: SSH config has errors!"
+  exit 1
+fi
 
 sudo systemctl restart ssh
+sudo systemctl restart sshd
 
-echo "SSH config completed. Reboot recommended."
+echo "SSH config completed successfully."

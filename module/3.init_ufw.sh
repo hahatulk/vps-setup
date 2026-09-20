@@ -5,7 +5,7 @@
 
 echo "Starting UFW setup..."
 
-sudo apt-get install ufw
+sudo apt-get install -y ufw
 
 # Allow ports interactively
 read -p "Enter SSH port to allow (default 2001): " ssh_port
