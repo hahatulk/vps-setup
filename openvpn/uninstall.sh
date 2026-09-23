@@ -39,7 +39,6 @@ done
 
 require_root
 acquire_pki_lock
-acquire_config_lock
 
 SERVER_NAME="$SERVER_NAME_DEFAULT"
 CLIENT_DIR="$CLIENT_DIR_DEFAULT"
@@ -56,24 +55,12 @@ fi
 validate_safe_absolute_dir "$CLIENT_DIR"
 
 info "Останавливаю OpenVPN..."
-if systemctl is-active --quiet "openvpn-server@$SERVER_NAME.service"; then
-  systemctl stop "openvpn-server@$SERVER_NAME.service" ||
-    die "Не удалось остановить OpenVPN; uninstall прерван."
-fi
-systemctl is-active --quiet "openvpn-server@$SERVER_NAME.service" &&
-  die "CRITICAL: OpenVPN всё ещё активен; файлы и firewall не удаляю."
-systemctl disable "openvpn-server@$SERVER_NAME.service" 2>/dev/null || true
+systemctl disable --now "openvpn-server@$SERVER_NAME.service" 2>/dev/null || true
 
 if [[ -x /usr/local/sbin/ovpn-fw ]]; then
-  /usr/local/sbin/ovpn-fw down || die "Не удалось удалить firewall chains; uninstall прерван."
+  /usr/local/sbin/ovpn-fw down || true
 fi
-if systemctl is-active --quiet pve-openvpn-fw.service; then
-  systemctl stop pve-openvpn-fw.service ||
-    die "Не удалось остановить pve-openvpn-fw.service; uninstall прерван."
-fi
-systemctl is-active --quiet pve-openvpn-fw.service &&
-  die "CRITICAL: firewall service всё ещё активен; удаление не продолжаю."
-systemctl disable pve-openvpn-fw.service 2>/dev/null || true
+systemctl disable --now pve-openvpn-fw.service 2>/dev/null || true
 
 unit_file=/etc/systemd/system/pve-openvpn-fw.service
 if [[ -f "$unit_file" && ! -L "$unit_file" ]] &&

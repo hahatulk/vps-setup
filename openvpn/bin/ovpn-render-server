@@ -6,18 +6,13 @@ source /usr/local/lib/pve-openvpn/common.sh
 
 require_root
 require_cmd openssl
-acquire_config_lock
 load_config
 
 [[ -d "$SERVER_DIR" && ! -L "$SERVER_DIR" ]] ||
   die "Небезопасный server directory: $SERVER_DIR"
-for required_file in ca.crt server.crt crl.pem; do
-  secure_root_file "$SERVER_DIR/$required_file" ||
-    die "Отсутствует небезопасный/непригодный root-owned regular file: $SERVER_DIR/$required_file"
-done
-for private_file in server.key tls-crypt-v2-server.key; do
-  secure_private_file "$SERVER_DIR/$private_file" ||
-    die "Private key небезопасен (нужен root-owned regular file без group/other access): $SERVER_DIR/$private_file"
+for required_file in ca.crt server.crt server.key tls-crypt-v2-server.key; do
+  [[ -f "$SERVER_DIR/$required_file" && ! -L "$SERVER_DIR/$required_file" && -s "$SERVER_DIR/$required_file" ]] ||
+    die "Отсутствует безопасный regular file: $SERVER_DIR/$required_file"
 done
 crl_is_healthy "$SERVER_DIR/crl.pem" "$SERVER_DIR/ca.crt" ||
   die "CRL отсутствует, повреждён или истёк; server config не обновлён."

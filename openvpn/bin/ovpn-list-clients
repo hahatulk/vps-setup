@@ -25,14 +25,7 @@ function status_name(s) {
   client=subject
   sub(/^.*CN=/, "", client)
   sub(/\/.*/, "", client)
-  if (client == server_name || client == "CA" || client == "") next
-  # Easy-RSA index is append-only: retain the newest entry for renewed identities.
-  latest_status[client]=$1
-  latest_expiry[client]=$2
-  latest_serial[client]=$4
-}
-END {
-  for (client in latest_status)
-    printf "%-10s %-32s %-18s %-24s\n", status_name(latest_status[client]), client,
-           latest_expiry[client], latest_serial[client]
-}' "$index" | sort -k2,2
+  if (client != server_name && client != "") {
+    printf "%-10s %-32s %-18s %-24s\n", status_name($1), client, $2, $4
+  }
+}' "$index"

@@ -247,7 +247,6 @@ fi
 
 # Serialize every persistent change with management commands and uninstall.
 acquire_pki_lock
-acquire_config_lock
 
 info "Устанавливаю управляющие команды..."
 if [[ -e /usr/local/lib/pve-openvpn ]]; then
