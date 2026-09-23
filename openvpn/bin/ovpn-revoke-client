@@ -8,7 +8,9 @@ require_root
 require_cmd systemctl
 require_cmd openssl
 load_config
-acquire_pki_lock
+require_secure_root_dir "$EASYRSA_DIR"
+require_secure_root_dir "$EASYRSA_PKI_DIR"
+require_secure_root_dir "$SERVER_DIR"
 
 crl_revokes_client() {
   local crl_file="$1" client_name="$2" serial
@@ -52,29 +54,32 @@ stop_openvpn_fail_closed() {
   die "OpenVPN остановлен fail-closed."
 }
 
-disconnect_all=0
-name=""
+require_interactive_tty
+(($# == 0)) || die "ovpn-revoke-client не принимает аргументы. Запусти просто: ovpn-revoke-client"
 
-for arg in "$@"; do
-  case "$arg" in
-    --disconnect-all) disconnect_all=1 ;;
-    -h|--help)
-      echo "Использование: ovpn-revoke-client CLIENT_NAME [--disconnect-all]"
-      exit 0
-      ;;
-    -*)
-      die "Неизвестный параметр: $arg"
-      ;;
-    *)
-      [[ -z "$name" ]] || die "Укажи только одно имя клиента."
-      name="$arg"
-      ;;
-  esac
-done
-
-[[ -n "$name" ]] || die "Использование: ovpn-revoke-client CLIENT_NAME [--disconnect-all]"
+echo "=== Отзыв OpenVPN-клиента ==="
+echo
+if ! name="$(prompt_client_from_pki "V E" "Выбери клиента, сертификат которого нужно отозвать:")"; then
+  info "Отменено."
+  exit 0
+fi
 validate_client_name "$name"
 
+echo
+warn "Отзыв сертификата необратим: это имя клиента повторно использоваться не будет."
+IFS= read -r -p "Для подтверждения введи REVOKE: " confirmation || die "Ввод прерван."
+[[ "$confirmation" == "REVOKE" ]] || {
+  info "Отменено."
+  exit 0
+}
+
+disconnect_all=0
+if prompt_yes_no "Сразу перезапустить OpenVPN и оборвать все текущие VPN-сессии?" no; then
+  disconnect_all=1
+fi
+
+# Lock берём только после пользовательских подтверждений.
+acquire_pki_lock
 status="$(pki_client_status "$name" 2>/dev/null || true)"
 if [[ "$status" == "R" ]]; then
   rm -f -- \
@@ -154,6 +159,5 @@ if (( disconnect_all )); then
 else
   echo "Новые TLS-сессии этого сертификата будут отклонены."
   echo "Уже установленная сессия может жить до renegotiation."
-  echo "Для немедленного сброса всех VPN-сессий:"
-  echo "  ovpn-revoke-client $name --disconnect-all"
+  echo "Если позже потребуется оборвать все текущие сессии, запусти: ovpn-restart"
 fi

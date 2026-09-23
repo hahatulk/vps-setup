@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+ok() {
+  echo "OK: $*"
+}
+
+echo "== Bash syntax =="
+files=(install.sh uninstall.sh lib/common.sh lib/verify-crl-health lib/pve-openvpn-fw lib/pve-openvpn-render-server)
+while IFS= read -r f; do
+  files+=("$f")
+done < <(find bin -maxdepth 1 -type f -name 'ovpn*' -print | sort)
+
+bash -n "${files[@]}" || fail "bash -n"
+ok "bash syntax"
+
+echo
+echo "== Common library =="
+# shellcheck disable=SC1091
+source "$ROOT/lib/common.sh"
+
+[[ "$(normalize_cidr 10.8.0.17/24)" == "10.8.0.0/24" ]] || fail "normalize_cidr"
+[[ "$(normalize_cidr 192.168.50.123/26)" == "192.168.50.64/26" ]] || fail "normalize /26"
+cidr_overlap 10.8.0.0/24 10.8.0.128/25 || fail "overlap true"
+if cidr_overlap 10.8.0.0/24 10.9.0.0/24; then fail "overlap false"; fi
+validate_endpoint vpn.example.com
+validate_endpoint 203.0.113.10
+ok "CIDR/endpoint validation"
+
+echo
+echo "== Interactive ovpn policy =="
+for f in bin/ovpn bin/ovpn-add-client bin/ovpn-list-clients bin/ovpn-restart          bin/ovpn-revoke-client bin/ovpn-scrub-client-secret bin/ovpn-set-mode bin/ovpn-status; do
+  [[ -f "$f" ]] || fail "missing $f"
+  grep -Fq '($# == 0)' "$f" || fail "$f does not explicitly reject arguments"
+  grep -Fq 'require_interactive_tty' "$f" || fail "$f is not explicitly interactive/TTY-only"
+done
+[[ ! -e bin/ovpn-fw ]] || fail "internal firewall helper leaked into user-facing bin/"
+[[ ! -e bin/ovpn-render-server ]] || fail "internal render helper leaked into user-facing bin/"
+ok "ovpn commands are zero-argument user interfaces"
+
+echo
+echo "== PKI example / Git safety =="
+for expected in   pki-example/README.md   pki-example/pki/README.md   pki-example/pki/vars.example   pki-example/pki/private/.gitkeep   pki-example/pki/issued/.gitkeep   pki-example/pki/reqs/.gitkeep   pki-example/pki/certs_by_serial/.gitkeep   pki-example/pki/revoked/.gitkeep   pki-example/pki/inline/.gitkeep   pki-example/pki/tls-crypt-v2-clients/.gitkeep   pki-example/pki/secret-scrubbed/.gitkeep; do
+  [[ -e "$expected" ]] || fail "missing PKI placeholder $expected"
+done
+
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  # Nonexistent paths are intentional: git check-ignore can validate the policy.
+  for secret in     pki/private/ca.key     pki-example/pki/private/ca.key     pki-example/pki/issued/server.crt     pki-example/pki/crl.pem     pki-example/pki/index.txt     clients/test.ovpn; do
+    git check-ignore -q -- "$ROOT/$secret" || fail "Git would not ignore secret path: $secret"
+  done
+
+  module_rel="$(git -C "$ROOT" ls-files --full-name . | sed -n '1s#/[^/]*$##p')"
+  [[ -n "$module_rel" ]] || module_rel="openvpn"
+
+  tracked_secrets="$(
+    git -C "$ROOT" ls-files --full-name . |
+      grep -E '\.(key|ovpn|p12|pfx|pkcs12|pem|csr|req|crt)$|/(index\.txt([^/]*)?|serial(\.old)?|crlnumber(\.old)?|crl\.pem)$' || true
+  )"
+  [[ -z "$tracked_secrets" ]] || {
+    echo "$tracked_secrets" >&2
+    fail "tracked secret-like PKI files found"
+  }
+  ok "Git secret ignore policy"
+else
+  echo "SKIP: not inside a Git worktree"
+fi
+
+echo
+echo "All self-tests passed."

@@ -89,7 +89,7 @@ openvpn/pki-example/pki/
 После успешного импорта можно удалить серверные копии client secrets:
 
 ```bash
-ovpn-scrub-client-secret <client>
+ovpn-scrub-client-secret
 ```
 
 Это **не revoke**. Уже импортированный профиль продолжит работать.
@@ -97,7 +97,7 @@ ovpn-scrub-client-secret <client>
 Для блокировки клиента:
 
 ```bash
-ovpn-revoke-client <client>
+ovpn-revoke-client
 ```
 
 После scrub этот же client profile повторно собрать нельзя. Если клиент потерял профиль, отзови старую identity и создай новую с новым CN.
@@ -175,6 +175,12 @@ openssl crl -in /etc/openvpn/server/crl.pem -noout -lastupdate -nextupdate
 Не запускай Easy-RSA вручную параллельно с этими командами. Если используешь свои automation/scripts для PKI, они должны использовать тот же lock либо работать в отдельной PKI.
 
 ---
+
+## Interactive management
+
+Пользовательские команды `ovpn`, `ovpn-add-client`, `ovpn-revoke-client`, `ovpn-scrub-client-secret`, `ovpn-set-mode` и `ovpn-restart` требуют настоящий TTY и не принимают destructive параметры из stdin/CLI. Это снижает риск случайного запуска из pipe/cron и делает опасные действия явными через меню и подтверждения.
+
+Внутренние systemd helpers находятся в `/usr/local/lib/pve-openvpn/` и не являются пользовательскими `ovpn-*` командами.
 
 ## Permissions
 
@@ -282,10 +288,13 @@ VPN pool проверяется на overlap с:
 Набор использует отдельные chains:
 
 ```text
+PVE-OVPN-IN-GUARD
 PVE-OVPN-GUARD
 PVE-OVPN-ALLOW
 PVE-OVPN-NAT
 ```
+
+`PVE-OVPN-IN-GUARD` подключается в начале `INPUT` и выполняет только anti-spoof проверку: source из VPN pool допускается к дальнейшей policy только через `tun`, а пакет из `tun` не может использовать source вне VPN pool. Этот chain **не открывает** GUI/SSH или другие host-порты.
 
 `PVE-OVPN-GUARD` подключается в начале `FORWARD`: разрешённые направления возвращаются в обычную firewall policy, а любой другой forwarded traffic с VPN source блокируется. `PVE-OVPN-ALLOW` подключается в конце и помогает при обычной `FORWARD DROP` policy, но не может обойти более ранний явный DROP Proxmox Firewall. Набор не очищает чужие firewall tables/chains.
 
@@ -323,7 +332,7 @@ systemctl restart pve-openvpn-fw
 В режиме:
 
 ```bash
-ovpn-set-mode full
+ovpn-set-mode
 ```
 
 IPv4 идёт через VPN, но существующий native IPv6 клиента может продолжить идти напрямую.
@@ -438,6 +447,7 @@ systemctl is-active pve-openvpn-fw
 sysctl net.ipv4.ip_forward
 ip -br addr show tun0
 
+iptables -S PVE-OVPN-IN-GUARD
 iptables -S PVE-OVPN-GUARD
 iptables -S PVE-OVPN-ALLOW
 iptables -t nat -S PVE-OVPN-NAT

@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# shellcheck disable=SC1091
+source /usr/local/lib/pve-openvpn/common.sh
+
+require_root
+require_cmd systemctl
+load_config
+require_interactive_tty
+
+(($# == 0)) || die "ovpn-restart не принимает аргументы. Запусти просто: ovpn-restart"
+
+echo "=== Перезапуск OpenVPN ==="
+echo "Будут разорваны все текущие VPN-сессии; клиенты смогут переподключиться."
+prompt_yes_no "Перезапустить openvpn-server@${OVPN_SERVER_NAME}.service?" no || {
+  info "Отменено."
+  exit 0
+}
+
+systemctl restart pve-openvpn-fw.service
+systemctl restart "openvpn-server@${OVPN_SERVER_NAME}.service"
+
+if systemctl is-active --quiet "openvpn-server@${OVPN_SERVER_NAME}.service"; then
+  info "OpenVPN успешно перезапущен."
+else
+  die "OpenVPN после перезапуска не активен. Проверь journalctl -u openvpn-server@${OVPN_SERVER_NAME}.service"
+fi

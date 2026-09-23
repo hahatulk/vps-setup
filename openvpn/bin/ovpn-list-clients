@@ -6,14 +6,39 @@ source /usr/local/lib/pve-openvpn/common.sh
 
 require_root
 load_config
+require_interactive_tty
+
+(($# == 0)) || die "ovpn-list-clients не принимает аргументы. Запусти просто: ovpn-list-clients"
 
 index="$EASYRSA_PKI_DIR/index.txt"
-[[ -r "$index" ]] || die "Не найден индекс PKI: $index"
+[[ -r "$index" && -f "$index" && ! -L "$index" ]] || die "Не найден безопасный индекс PKI: $index"
 
+echo "=== Клиенты OpenVPN ==="
+echo
+echo "  1) Все клиенты"
+echo "  2) Только ACTIVE"
+echo "  3) Только REVOKED"
+echo "  4) Только EXPIRED"
+echo "  0) Отмена"
+echo
+
+while true; do
+  IFS= read -r -p "Выбор: " choice || die "Ввод прерван."
+  case "$choice" in
+    1) filter="" ; break ;;
+    2) filter="V" ; break ;;
+    3) filter="R" ; break ;;
+    4) filter="E" ; break ;;
+    0) info "Отменено."; exit 0 ;;
+    *) warn "Выбери 0, 1, 2, 3 или 4." ;;
+  esac
+done
+
+echo
 printf '%-10s %-32s %-18s %-24s\n' "STATUS" "CLIENT" "EXPIRES" "SERIAL"
 printf '%-10s %-32s %-18s %-24s\n' "----------" "--------------------------------" "------------------" "------------------------"
 
-awk -F '\t' -v server_name="$OVPN_SERVER_NAME" '
+awk -F '\t' -v server_name="$OVPN_SERVER_NAME" -v filter="$filter" '
 function status_name(s) {
   if (s == "V") return "ACTIVE"
   if (s == "R") return "REVOKED"
@@ -25,7 +50,11 @@ function status_name(s) {
   client=subject
   sub(/^.*CN=/, "", client)
   sub(/\/.*/, "", client)
-  if (client != server_name && client != "") {
+  if (client != server_name && client != "" && (filter == "" || $1 == filter)) {
     printf "%-10s %-32s %-18s %-24s\n", status_name($1), client, $2, $4
+    found=1
   }
+}
+END {
+  if (!found) print "(нет клиентов в выбранной категории)"
 }' "$index"

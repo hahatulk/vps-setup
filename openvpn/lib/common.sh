@@ -3,8 +3,10 @@ set -Eeuo pipefail
 umask 077
 export LC_ALL=C
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
-# Easy-RSA 3.2 uses DISABLE_INLINE, not NO_INLINE. Also covers reused old vars.
+# Easy-RSA changed the inline-control variable across 3.2.x releases.
+# Export both names: 3.2.2 understands DISABLE_INLINE, newer releases use NO_INLINE.
 export EASYRSA_DISABLE_INLINE=1
+export EASYRSA_NO_INLINE=1
 
 CONFIG_FILE="/etc/openvpn/pve-openvpn.conf"
 EASYRSA_DIR="/etc/openvpn/easy-rsa"
@@ -37,6 +39,112 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Не найдена команда: $1"
 }
 
+require_interactive_tty() {
+  [[ -t 0 && -t 1 ]] || die "Эта команда работает интерактивно и требует TTY/терминал."
+}
+
+prompt_nonempty() {
+  local prompt="$1" value
+  while true; do
+    IFS= read -r -p "$prompt" value || die "Ввод прерван."
+    [[ -n "$value" ]] || {
+      warn "Значение не может быть пустым."
+      continue
+    }
+    printf '%s\n' "$value"
+    return 0
+  done
+}
+
+prompt_with_default() {
+  local prompt="$1" default="$2" value
+  IFS= read -r -p "$prompt [$default]: " value || die "Ввод прерван."
+  printf '%s\n' "${value:-$default}"
+}
+
+prompt_yes_no() {
+  local prompt="$1" default="${2:-no}" answer suffix
+  case "$default" in
+    yes) suffix="[Y/n]" ;;
+    no) suffix="[y/N]" ;;
+    *) die "Некорректный default для prompt_yes_no: $default" ;;
+  esac
+
+  while true; do
+    IFS= read -r -p "$prompt $suffix: " answer || die "Ввод прерван."
+    if [[ -z "$answer" ]]; then
+      [[ "$default" == "yes" ]]
+      return
+    fi
+    case "$answer" in
+      y|Y|yes|YES|Yes|да|Да|ДА) return 0 ;;
+      n|N|no|NO|No|нет|Нет|НЕТ) return 1 ;;
+      *) warn "Ответь y/yes/да или n/no/нет." ;;
+    esac
+  done
+}
+
+pki_client_rows() {
+  local index="$EASYRSA_PKI_DIR/index.txt"
+  [[ -r "$index" ]] || return 1
+  awk -F '\t' -v server_name="${OVPN_SERVER_NAME:-$SERVER_NAME_DEFAULT}" '
+    {
+      subject=$6
+      cn=subject
+      sub(/^.*CN=/, "", cn)
+      sub(/\/.*/, "", cn)
+      if (cn != "" && cn != server_name) {
+        status=$1
+        label=status
+        if (status == "V") label="ACTIVE"
+        else if (status == "R") label="REVOKED"
+        else if (status == "E") label="EXPIRED"
+        print cn "\t" status "\t" label
+      }
+    }
+  ' "$index"
+}
+
+prompt_client_from_pki() {
+  local allowed_statuses="${1:-V E R}" title="${2:-Выбери VPN-клиента:}"
+  local -a names=() labels=()
+  local cn status label token allowed i choice
+
+  while IFS=$'\t' read -r cn status label; do
+    [[ -n "$cn" ]] || continue
+    allowed=0
+    for token in $allowed_statuses; do
+      [[ "$status" == "$token" ]] && allowed=1
+    done
+    (( allowed )) || continue
+    names+=("$cn")
+    labels+=("$label")
+  done < <(pki_client_rows || true)
+
+  ((${#names[@]} > 0)) || die "Подходящих клиентов в PKI не найдено."
+
+  echo "$title" >&2
+  for i in "${!names[@]}"; do
+    printf '  %d) %-32s [%s]\n' "$((i + 1))" "${names[$i]}" "${labels[$i]}" >&2
+  done
+  echo "  0) Отмена" >&2
+
+  while true; do
+    IFS= read -r -p "Номер: " choice || die "Ввод прерван."
+    [[ "$choice" =~ ^[0-9]+$ ]] || {
+      warn "Введи номер из списка."
+      continue
+    }
+    choice=$((10#$choice))
+    (( choice == 0 )) && return 1
+    if (( choice >= 1 && choice <= ${#names[@]} )); then
+      printf '%s\n' "${names[$((choice - 1))]}"
+      return 0
+    fi
+    warn "Нет такого пункта."
+  done
+}
+
 acquire_pki_lock() {
   require_cmd flock
   if [[ -e "$PKI_LOCK_DIR" ]]; then
@@ -51,14 +159,41 @@ acquire_pki_lock() {
   exec 9>"$PKI_LOCK_FILE"
   [[ "$(stat -c '%u' "$PKI_LOCK_FILE")" == "0" ]] || die "PKI lock file должен принадлежать root."
   chmod 0600 "$PKI_LOCK_FILE"
-  # Do not wait forever behind a wedged/manual process. The descriptor keeps the
-  # lock for this shell and is released automatically on every exit path.
   flock -x -w 30 9 || die "PKI занята другой операцией (lock timeout 30s). Повтори позже."
 }
 
-config_file_is_secure() {
-  local file="${1:-$CONFIG_FILE}" owner mode mode_dec
+secure_root_dir() {
+  local dir="$1" owner mode mode_dec
+  [[ -d "$dir" && ! -L "$dir" ]] || return 1
+  owner="$(stat -c '%u' "$dir")" || return 1
+  mode="$(stat -c '%a' "$dir")" || return 1
+  [[ "$owner" == "0" && "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+  mode_dec=$((8#$mode))
+  # Group/other may read/traverse public directories, but must never write them.
+  (( (mode_dec & 0022) == 0 ))
+}
+
+secure_root_file() {
+  local file="$1" owner mode mode_dec
   [[ -f "$file" && ! -L "$file" ]] || return 1
+  owner="$(stat -c '%u' "$file")" || return 1
+  mode="$(stat -c '%a' "$file")" || return 1
+  [[ "$owner" == "0" && "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+  mode_dec=$((8#$mode))
+  (( (mode_dec & 0022) == 0 ))
+}
+
+require_secure_root_dir() {
+  local dir="$1"
+  secure_root_dir "$dir" ||
+    die "Каталог должен быть real directory, принадлежать root и не быть writable для group/other: $dir"
+}
+
+config_file_is_secure() {
+  local file="${1:-$CONFIG_FILE}" owner mode mode_dec parent
+  [[ -f "$file" && ! -L "$file" ]] || return 1
+  parent="$(dirname -- "$file")"
+  secure_root_dir "$parent" || return 1
   owner="$(stat -c '%u' "$file")" || return 1
   mode="$(stat -c '%a' "$file")" || return 1
   [[ "$owner" == "0" && "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
@@ -108,6 +243,9 @@ load_config() {
   [[ "$OVPN_TUN_IF" =~ ^[A-Za-z0-9_.:-]{1,15}$ ]] || die "Некорректный OVPN_TUN_IF."
   [[ "$OVPN_SERVER_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]] || die "Некорректный OVPN_SERVER_NAME."
   validate_safe_absolute_dir "$OVPN_CLIENT_DIR"
+  if [[ -e "$OVPN_CLIENT_DIR" || -L "$OVPN_CLIENT_DIR" ]]; then
+    require_secure_root_dir "$OVPN_CLIENT_DIR"
+  fi
   [[ "$OVPN_MAX_CLIENTS" =~ ^[0-9]{1,4}$ ]] || die "Некорректный OVPN_MAX_CLIENTS."
   (( 10#$OVPN_MAX_CLIENTS >= 1 && 10#$OVPN_MAX_CLIENTS <= 4096 )) || die "OVPN_MAX_CLIENTS вне диапазона."
   [[ "$OVPN_TLS_CRYPT_V2_COOKIE" == "force-cookie" || "$OVPN_TLS_CRYPT_V2_COOKIE" == "allow-noncookie" ]] ||

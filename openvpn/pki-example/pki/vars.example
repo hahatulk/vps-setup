@@ -12,4 +12,9 @@ set_var EASYRSA_CRL_DAYS 3650
 set_var EASYRSA_RAND_SN "yes"
 
 # The kit builds its own .ovpn bundles and avoids extra Easy-RSA inline copies.
+# Easy-RSA 3.2.x changed this variable name across releases; install.sh
+# detects which names the installed easyrsa script supports.
+# 3.2.2:
 set_var EASYRSA_DISABLE_INLINE 1
+# Newer 3.2.x:
+set_var EASYRSA_NO_INLINE 1

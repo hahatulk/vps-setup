@@ -1,9 +1,14 @@
-# Runtime PKI and exports must never be committed (including example paths).
+# Security: never commit runtime OpenVPN/PKI secrets.
+# Scoped to vps-setup/openvpn/.
+
+# Runtime trees that must never enter Git.
 pki/
 easy-rsa/
 runtime/
 clients/
 openvpn-clients/
+
+# Secret/private/export formats.
 *.key
 *.ovpn
 *.p12
@@ -12,31 +17,42 @@ openvpn-clients/
 *.pem
 *.csr
 *.req
-*.crt
-index.txt*
-serial*
-crlnumber*
 
-# Deny every file in the example by default. Allow only documented placeholders.
-# Do NOT use !pki-example/**: that also unignores private keys and client profiles.
-/pki-example/**
-!/pki-example/README.md
-!/pki-example/pki/
-!/pki-example/pki/README.md
-!/pki-example/pki/vars.example
-!/pki-example/pki/private/
-!/pki-example/pki/private/.gitkeep
-!/pki-example/pki/issued/
-!/pki-example/pki/issued/.gitkeep
-!/pki-example/pki/reqs/
-!/pki-example/pki/reqs/.gitkeep
-!/pki-example/pki/certs_by_serial/
-!/pki-example/pki/certs_by_serial/.gitkeep
-!/pki-example/pki/tls-crypt-v2-clients/
-!/pki-example/pki/tls-crypt-v2-clients/.gitkeep
-!/pki-example/pki/secret-scrubbed/
-!/pki-example/pki/secret-scrubbed/.gitkeep
-!/pki-example/pki/revoked/
-!/pki-example/pki/revoked/.gitkeep
-!/pki-example/pki/inline/
-!/pki-example/pki/inline/.gitkeep
+# Runtime PKI databases / revocation state.
+index.txt
+index.txt.*
+serial
+serial.old
+crlnumber
+crlnumber.old
+crl.pem
+
+# Certificates are public cryptographically, but runtime identity material
+# does not belong in this repository.
+*.crt
+
+# pki-example is an allowlisted, secret-free directory skeleton.
+# IMPORTANT: do not use !pki-example/** because that would unignore
+# accidentally copied *.key/*.crt files.
+!pki-example/
+!pki-example/README.md
+!pki-example/pki/
+!pki-example/pki/README.md
+!pki-example/pki/vars.example
+
+!pki-example/pki/private/
+!pki-example/pki/private/.gitkeep
+!pki-example/pki/issued/
+!pki-example/pki/issued/.gitkeep
+!pki-example/pki/reqs/
+!pki-example/pki/reqs/.gitkeep
+!pki-example/pki/certs_by_serial/
+!pki-example/pki/certs_by_serial/.gitkeep
+!pki-example/pki/revoked/
+!pki-example/pki/revoked/.gitkeep
+!pki-example/pki/inline/
+!pki-example/pki/inline/.gitkeep
+!pki-example/pki/tls-crypt-v2-clients/
+!pki-example/pki/tls-crypt-v2-clients/.gitkeep
+!pki-example/pki/secret-scrubbed/
+!pki-example/pki/secret-scrubbed/.gitkeep

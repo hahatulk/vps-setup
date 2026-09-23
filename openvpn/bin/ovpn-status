@@ -1,72 +1,189 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+
 # shellcheck disable=SC1091
 source /usr/local/lib/pve-openvpn/common.sh
 
 require_root
 require_cmd openssl
+require_cmd iptables
+require_cmd systemctl
 load_config
+require_interactive_tty
 
-echo "=== OpenVPN ==="
-openvpn --version | head -n1 || true
-echo
-printf 'Endpoint:       %s:%s/%s\n' "$OVPN_ENDPOINT" "$OVPN_PORT" "$OVPN_PROTO"
-printf 'WAN interface:  %s\n' "$OVPN_WAN_IF"
-printf 'VPN subnet:     %s\n' "$OVPN_VPN_CIDR"
-printf 'Mode:           %s\n' "$OVPN_MODE"
-printf 'Tunnel:         %s\n' "$OVPN_TUN_IF"
-printf 'Max clients:    %s\n' "$OVPN_MAX_CLIENTS"
-printf 'LAN routes:     %s\n' "${OVPN_LANS[*]:-(none)}"
-printf 'tls-crypt-v2:   %s\n' "$OVPN_TLS_CRYPT_V2_COOKIE"
-echo
+(($# == 0)) || die "ovpn-status не принимает аргументы. Запусти просто: ovpn-status"
 
-echo "=== PKI health ==="
-if [[ -s "$SERVER_DIR/server.crt" ]]; then
-  openssl x509 -in "$SERVER_DIR/server.crt" -noout -subject -enddate
-else
-  echo "Server certificate missing"
-fi
-if [[ -s "$SERVER_DIR/crl.pem" ]]; then
-  openssl crl -in "$SERVER_DIR/crl.pem" -noout -nextupdate || true
-else
-  echo "CRL MISSING: service pre-check should block startup"
-fi
-echo
+show_summary() {
+  echo "=== OpenVPN summary ==="
+  openvpn --version | head -n1 || true
+  echo
+  printf 'Endpoint:       %s:%s/%s\n' "$OVPN_ENDPOINT" "$OVPN_PORT" "$OVPN_PROTO"
+  printf 'WAN interface:  %s\n' "$OVPN_WAN_IF"
+  printf 'VPN subnet:     %s\n' "$OVPN_VPN_CIDR"
+  printf 'Mode:           %s\n' "$OVPN_MODE"
+  printf 'Tunnel:         %s\n' "$OVPN_TUN_IF"
+  printf 'Max clients:    %s\n' "$OVPN_MAX_CLIENTS"
+  printf 'LAN routes:     %s\n' "${OVPN_LANS[*]:-(none)}"
+  printf 'tls-crypt-v2:   %s\n' "$OVPN_TLS_CRYPT_V2_COOKIE"
+  echo
+  printf 'OpenVPN service: '
+  systemctl is-active "openvpn-server@${OVPN_SERVER_NAME}.service" 2>/dev/null || true
+  printf 'Firewall service: '
+  systemctl is-active pve-openvpn-fw.service 2>/dev/null || true
+  printf 'IPv4 forwarding: '
+  sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "unknown"
+  echo
+  ip -br addr show "$OVPN_TUN_IF" 2>/dev/null || echo "$OVPN_TUN_IF отсутствует"
+  ss -lntup 2>/dev/null | grep -E "[:.]$OVPN_PORT([[:space:]]|$)" || echo "Listener на порту $OVPN_PORT не найден"
+}
 
-echo "=== File permissions ==="
-for f in "$CONFIG_FILE" "$SERVER_DIR/server.key" "$SERVER_DIR/tls-crypt-v2-server.key" "$SERVER_DIR/crl.pem"; do
-  if [[ -e "$f" ]]; then
-    stat -c '%A %U:%G %n' "$f"
+show_pki() {
+  echo "=== PKI / CRL health ==="
+  if [[ -f "$SERVER_DIR/server.crt" && ! -L "$SERVER_DIR/server.crt" && -s "$SERVER_DIR/server.crt" ]]; then
+    openssl x509 -in "$SERVER_DIR/server.crt" -noout -subject -issuer -enddate
+    if openssl verify -purpose sslserver -CAfile "$SERVER_DIR/ca.crt" "$SERVER_DIR/server.crt" >/dev/null 2>&1; then
+      echo "Server certificate verify: OK"
+    else
+      warn "Server certificate verify: FAILED"
+    fi
   else
-    echo "MISSING $f"
+    warn "Server certificate missing/unsafe"
   fi
+  echo
+  if crl_is_healthy "$SERVER_DIR/crl.pem" "$SERVER_DIR/ca.crt"; then
+    openssl crl -in "$SERVER_DIR/crl.pem" -noout -lastupdate -nextupdate
+    echo "CRL verify: OK"
+  else
+    warn "CRL MISSING/INVALID/EXPIRED: новые TLS handshakes должны блокироваться fail-closed hook."
+  fi
+  echo
+  echo "=== Sensitive file permissions ==="
+  for f in "$CONFIG_FILE" "$SERVER_DIR/server.key" "$SERVER_DIR/tls-crypt-v2-server.key" "$SERVER_DIR/crl.pem"; do
+    if [[ -e "$f" || -L "$f" ]]; then
+      stat -c '%A %U:%G %n' "$f" 2>/dev/null || true
+    else
+      echo "MISSING $f"
+    fi
+  done
+}
+
+show_services() {
+  echo "=== OpenVPN service ==="
+  systemctl --no-pager --full status "openvpn-server@${OVPN_SERVER_NAME}.service" || true
+  echo
+  echo "=== Firewall service ==="
+  systemctl --no-pager --full status pve-openvpn-fw.service || true
+}
+
+show_firewall() {
+  echo "=== Firewall hooks ==="
+  fw_ok=1
+
+  for chain in PVE-OVPN-IN-GUARD PVE-OVPN-GUARD PVE-OVPN-ALLOW; do
+    if iptables_cmd -S "$chain" >/dev/null 2>&1; then
+      echo "OK filter chain: $chain"
+    else
+      echo "MISSING filter chain: $chain"
+      fw_ok=0
+    fi
+  done
+
+  if iptables_cmd -t nat -S PVE-OVPN-NAT >/dev/null 2>&1; then
+    echo "OK nat chain: PVE-OVPN-NAT"
+  else
+    echo "MISSING nat chain: PVE-OVPN-NAT"
+    fw_ok=0
+  fi
+
+  if iptables_cmd -C INPUT -m comment --comment pve-openvpn-kit -j PVE-OVPN-IN-GUARD >/dev/null 2>&1; then
+    echo "OK INPUT -> PVE-OVPN-IN-GUARD"
+  else
+    echo "MISSING INPUT -> PVE-OVPN-IN-GUARD"
+    fw_ok=0
+  fi
+
+  if iptables_cmd -C FORWARD -m comment --comment pve-openvpn-kit -j PVE-OVPN-GUARD >/dev/null 2>&1; then
+    echo "OK FORWARD -> PVE-OVPN-GUARD"
+  else
+    echo "MISSING FORWARD -> PVE-OVPN-GUARD"
+    fw_ok=0
+  fi
+
+  if iptables_cmd -C FORWARD -m comment --comment pve-openvpn-kit -j PVE-OVPN-ALLOW >/dev/null 2>&1; then
+    echo "OK FORWARD -> PVE-OVPN-ALLOW"
+  else
+    echo "MISSING FORWARD -> PVE-OVPN-ALLOW"
+    fw_ok=0
+  fi
+
+  if iptables_cmd -t nat -C POSTROUTING -m comment --comment pve-openvpn-kit -j PVE-OVPN-NAT >/dev/null 2>&1; then
+    echo "OK POSTROUTING -> PVE-OVPN-NAT"
+  else
+    echo "MISSING POSTROUTING -> PVE-OVPN-NAT"
+    fw_ok=0
+  fi
+
+  if iptables_cmd -C PVE-OVPN-IN-GUARD -i "$OVPN_TUN_IF" -j DROP >/dev/null 2>&1; then
+    warn "Обнаружен аварийный INPUT DROP: host-доступ через VPN закрыт из-за предыдущей ошибки firewall."
+    fw_ok=0
+  fi
+
+  if (( fw_ok )); then
+    echo "Firewall integration: OK"
+  else
+    warn "Firewall integration неполна/аварийна. Проверь pve-openvpn-fw."
+  fi
+}
+
+show_clients() {
+  echo "=== Connected clients ==="
+  status_file="/var/log/openvpn/status.log"
+  if [[ -r "$status_file" && -f "$status_file" && ! -L "$status_file" ]]; then
+    awk -F, '
+      $1=="CLIENT_LIST" {
+        printf "%-24s %-24s %-16s %-16s\n", $2, $3, $4, $5
+        found=1
+      }
+      END { if (!found) print "Нет активных клиентов." }
+    ' "$status_file"
+  else
+    echo "Status file недоступен/небезопасен."
+  fi
+}
+
+echo "=== Статус OpenVPN ==="
+echo
+echo "  1) Краткий общий статус"
+echo "  2) PKI / сертификаты / CRL"
+echo "  3) systemd services"
+echo "  4) Firewall / NAT integration"
+echo "  5) Подключённые клиенты"
+echo "  6) Полный отчёт"
+echo "  0) Отмена"
+echo
+
+while true; do
+  IFS= read -r -p "Выбор: " choice || die "Ввод прерван."
+  case "$choice" in
+    1) echo; show_summary; break ;;
+    2) echo; show_pki; break ;;
+    3) echo; show_services; break ;;
+    4) echo; show_firewall; break ;;
+    5) echo; show_clients; break ;;
+    6)
+      echo
+      show_summary
+      echo
+      show_pki
+      echo
+      show_services
+      echo
+      show_firewall
+      echo
+      show_clients
+      break
+      ;;
+    0) info "Отменено."; exit 0 ;;
+    *) warn "Выбери число от 0 до 6." ;;
+  esac
 done
-echo
-
-echo "=== Services ==="
-systemctl --no-pager --full status "openvpn-server@${OVPN_SERVER_NAME}.service" || true
-echo
-systemctl --no-pager --full status pve-openvpn-fw.service || true
-echo
-
-echo "=== Tunnel ==="
-ip -br addr show "$OVPN_TUN_IF" 2>/dev/null || echo "$OVPN_TUN_IF отсутствует"
-echo
-
-echo "=== Listener ==="
-ss -lntup | grep -E "[:.]$OVPN_PORT([[:space:]]|$)" || echo "Listener на порту $OVPN_PORT не найден"
-echo
-
-echo "=== Connected clients ==="
-status_file="/var/log/openvpn/status.log"
-if [[ -r "$status_file" ]]; then
-  awk -F, '
-    $1=="CLIENT_LIST" {
-      printf "%-24s %-24s %-16s %-16s\n", $2, $3, $4, $5
-      found=1
-    }
-    END { if (!found) print "Нет активных клиентов." }
-  ' "$status_file"
-else
-  echo "Status file недоступен."
-fi

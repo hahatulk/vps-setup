@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# shellcheck disable=SC1091
+source /usr/local/lib/pve-openvpn/common.sh
+
+require_root
+require_interactive_tty
+load_config
+
+(($# == 0)) || die "Команда ovpn не принимает аргументы. Запусти просто: ovpn"
+
+run_action() {
+  local command="$1"
+  echo
+  if ! "$command"; then
+    warn "Операция завершилась с ошибкой."
+  fi
+  echo
+  IFS= read -r -p "Нажми Enter, чтобы вернуться в меню..." _ || true
+}
+
+while true; do
+  clear 2>/dev/null || true
+  echo "=========================================="
+  echo "         OpenVPN Manager for Proxmox"
+  echo "=========================================="
+  echo
+  echo "  1) Статус сервера"
+  echo "  2) Список клиентов"
+  echo "  3) Добавить клиента"
+  echo "  4) Отозвать клиента"
+  echo "  5) Удалить серверные копии client secrets"
+  echo "  6) Переключить split/full tunnel"
+  echo "  7) Перезапустить OpenVPN"
+  echo "  8) Показать последние логи OpenVPN"
+  echo "  0) Выход"
+  echo
+
+  IFS= read -r -p "Выбери действие: " choice || exit 0
+  case "$choice" in
+    1) run_action /usr/local/sbin/ovpn-status ;;
+    2) run_action /usr/local/sbin/ovpn-list-clients ;;
+    3) run_action /usr/local/sbin/ovpn-add-client ;;
+    4) run_action /usr/local/sbin/ovpn-revoke-client ;;
+    5) run_action /usr/local/sbin/ovpn-scrub-client-secret ;;
+    6) run_action /usr/local/sbin/ovpn-set-mode ;;
+    7) run_action /usr/local/sbin/ovpn-restart ;;
+    8)
+      echo
+      journalctl -u "openvpn-server@${OVPN_SERVER_NAME}.service" -n 80 --no-pager || true
+      echo
+      IFS= read -r -p "Нажми Enter, чтобы вернуться в меню..." _ || true
+      ;;
+    0) exit 0 ;;
+    *) warn "Нет такого пункта."; sleep 1 ;;
+  esac
+done

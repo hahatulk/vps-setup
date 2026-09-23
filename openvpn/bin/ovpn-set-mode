@@ -7,23 +7,57 @@ source /usr/local/lib/pve-openvpn/common.sh
 require_root
 require_cmd flock
 require_cmd systemctl
+load_config
+require_interactive_tty
+
+(($# == 0)) || die "ovpn-set-mode не принимает аргументы. Запусти просто: ovpn-set-mode"
+
+echo "=== Режим маршрутизации OpenVPN ==="
+echo "Текущий режим: $OVPN_MODE"
+echo
+echo "  1) split — через VPN только разрешённые LAN/VM сети"
+echo "  2) full  — весь IPv4-трафик клиента через VPN"
+echo "  0) Отмена"
+echo
+
+while true; do
+  IFS= read -r -p "Выбор: " choice || die "Ввод прерван."
+  case "$choice" in
+    1) mode="split"; break ;;
+    2) mode="full"; break ;;
+    0) info "Отменено."; exit 0 ;;
+    *) warn "Выбери 0, 1 или 2." ;;
+  esac
+done
+
+if [[ "$mode" == "$OVPN_MODE" ]]; then
+  info "Режим уже '$mode'. Ничего менять не нужно."
+  exit 0
+fi
+
+if [[ "$mode" == "full" ]]; then
+  warn "Full-tunnel здесь относится только к IPv4. Native IPv6 клиента может идти мимо VPN."
+fi
+
+prompt_yes_no "Переключить режим с '$OVPN_MODE' на '$mode' и перезапустить OpenVPN?" no || {
+  info "Отменено."
+  exit 0
+}
+
 if [[ -e /run/pve-openvpn || -L /run/pve-openvpn ]]; then
   [[ -d /run/pve-openvpn && ! -L /run/pve-openvpn ]] ||
     die "Небезопасный runtime directory: /run/pve-openvpn"
 fi
 install -d -o root -g root -m 0700 /run/pve-openvpn
 exec 7>/run/pve-openvpn/config.lock
-flock -x 7
+flock -x -w 30 7 || die "Конфигурация занята другой операцией. Повтори позже."
+
+# Состояние могло измениться пока пользователь отвечал.
 load_config
-
-mode="${1:-}"
-[[ "$mode" == "split" || "$mode" == "full" ]] ||
-  die "Использование: ovpn-set-mode split|full"
-
-[[ "$mode" != "$OVPN_MODE" ]] || {
-  info "Режим уже '$mode'."
+if [[ "$mode" == "$OVPN_MODE" ]]; then
+  info "Режим уже был изменён на '$mode' другой операцией."
   exit 0
-}
+fi
 
 backup="$(mktemp)"
 candidate="$(mktemp)"
@@ -48,7 +82,7 @@ rollback() {
   local failed=0
   warn "Откатываю изменение режима..."
   install -o root -g root -m 0600 "$backup" "$CONFIG_FILE" || failed=1
-  /usr/local/sbin/ovpn-render-server >/dev/null 2>&1 || failed=1
+  /usr/local/lib/pve-openvpn/pve-openvpn-render-server >/dev/null 2>&1 || failed=1
   systemctl restart pve-openvpn-fw.service >/dev/null 2>&1 || failed=1
   systemctl restart "openvpn-server@${OVPN_SERVER_NAME}.service" >/dev/null 2>&1 || failed=1
 
@@ -61,28 +95,22 @@ rollback() {
 
 install -o root -g root -m 0600 "$candidate" "$CONFIG_FILE"
 
-if ! /usr/local/sbin/ovpn-render-server; then
+if ! /usr/local/lib/pve-openvpn/pve-openvpn-render-server; then
   rollback || die "CRITICAL: rollback не завершён; OpenVPN остановлен."
-  die "Не удалось сгенерировать server config для режима '$mode'. Старый режим восстановлен."
+  die "Не удалось сгенерировать server config. Старый режим восстановлен."
 fi
 
 if ! systemctl restart pve-openvpn-fw.service; then
   rollback || die "CRITICAL: rollback не завершён; OpenVPN остановлен."
-  die "Не удалось применить firewall для режима '$mode'. Старый режим восстановлен."
+  die "Не удалось применить firewall. Старый режим восстановлен."
 fi
 
 if ! systemctl restart "openvpn-server@${OVPN_SERVER_NAME}.service"; then
   rollback || die "CRITICAL: rollback не завершён; OpenVPN остановлен."
-  die "OpenVPN не запустился с режимом '$mode'. Старый режим восстановлен."
+  die "OpenVPN не запустился. Старый режим восстановлен."
 fi
 
 trap - EXIT
 rm -f "$backup" "$candidate"
 
 info "Режим изменён на '$mode'."
-if [[ "$mode" == "full" ]]; then
-  echo "Весь IPv4-трафик клиента будет направляться через VPN."
-  warn "IPv6 этим набором не туннелируется. См. SECURITY.md/README про IPv6 bypass."
-else
-  echo "Через VPN отправляются только сети OVPN_LANS."
-fi

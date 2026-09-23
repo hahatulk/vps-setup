@@ -1,10 +1,18 @@
 # OpenVPN for Proxmox VE 9 / Debian 13
 
-Набор Bash-скриптов для установки и обслуживания OpenVPN на Proxmox VE 9.x / Debian 13 (Trixie).
+Интерактивный набор Bash-скриптов для установки и обслуживания OpenVPN на Proxmox VE 9.x / Debian 13.
 
-Комплект рассчитан на OpenVPN 2.6+ и Easy-RSA 3.x. На Debian 13 текущие stable-пакеты — OpenVPN 2.6.x и Easy-RSA 3.2.x.
+Главный принцип интерфейса: **обычному администратору не нужно запоминать аргументы команд**.
 
-## Структура репозитория
+После установки достаточно запускать:
+
+```bash
+sudo ovpn
+```
+
+и выбирать действия из меню.
+
+## Структура
 
 ```text
 openvpn/
@@ -14,17 +22,21 @@ openvpn/
 ├── install.sh
 ├── uninstall.sh
 ├── bin/
+│   ├── ovpn
 │   ├── ovpn-add-client
-│   ├── ovpn-fw
 │   ├── ovpn-list-clients
-│   ├── ovpn-render-server
+│   ├── ovpn-restart
 │   ├── ovpn-revoke-client
 │   ├── ovpn-scrub-client-secret
 │   ├── ovpn-set-mode
 │   └── ovpn-status
 ├── lib/
 │   ├── common.sh
-│   └── verify-crl-health
+│   ├── verify-crl-health
+│   ├── pve-openvpn-fw
+│   └── pve-openvpn-render-server
+├── tests/
+│   └── selftest.sh
 └── pki-example/
     ├── README.md
     └── pki/
@@ -34,333 +46,375 @@ openvpn/
         ├── issued/
         ├── reqs/
         ├── certs_by_serial/
-        ├── tls-crypt-v2-clients/
-        ├── secret-scrubbed/
         ├── revoked/
-        └── inline/
+        ├── inline/
+        ├── tls-crypt-v2-clients/
+        └── secret-scrubbed/
 ```
 
-`pki-example/` — только безопасный пример структуры. Настоящие ключи туда не кладутся.
+`pki-example/pki/` — **только безопасный пример структуры**. Там не должно быть настоящих сертификатов, ключей, CRL или Easy-RSA database.
 
-Реальная PKI создаётся на сервере:
+Реальная PKI на Proxmox создаётся в:
 
 ```text
 /etc/openvpn/easy-rsa/pki/
 ```
 
-## Основные меры безопасности
-
-- CA private key **по умолчанию защищён паролем**.
-- Режим CA без пароля доступен только явным `--ca-nopass`.
-- `umask 077`, PKI и client export directories закрыты от обычных пользователей.
-- Конфигурация, которая source-ится root-скриптами, должна принадлежать root и иметь права не шире `0600`.
-- PKI-операции сериализованы через `flock`.
-- Используется `tls-crypt-v2` с отдельным transport key для каждого клиента.
-- Сервер по умолчанию требует `force-cookie` для tls-crypt-v2.
-- CRL проверяется fail-closed отдельным `tls-verify` hook: отсутствующий, повреждённый или просроченный CRL блокирует handshake.
-- Server startup дополнительно блокируется systemd `ExecStartPre`, если отсутствуют необходимые cert/key/CRL файлы.
-- Client CN не переиспользуется после revoke.
-- Сертификат сервера проверяется против CA, а public key сертификата сверяется с private key.
-- VPN subnet проверяется на пересечение с существующими маршрутами и заданными LAN.
-- Split-tunnel firewall разрешает forwarding только к явно указанным `--lan`.
-- Full-tunnel forwarding ограничен выбранным WAN-интерфейсом.
-- Скрипты не добавляют широкое INPUT-правило на Proxmox и не пытаются обходить Proxmox Firewall.
-- В `.gitignore` блокируются PKI/private keys, `.ovpn`, PKCS#12 и runtime PKI state.
-
-Подробнее: [SECURITY.md](SECURITY.md).
-
 ---
 
-## 1. Подготовка
+## 1. Установка
 
-Проверь интерфейсы:
-
-```bash
-ip -br link
-ip -br addr
-ip route
-```
-
-Типичный Proxmox:
-
-```text
-default via 192.168.1.1 dev vmbr0
-```
-
-Пример схемы:
-
-```text
-Proxmox/LAN: 192.168.1.0/24
-VM network:  10.20.0.0/24
-VPN pool:    10.8.0.0/24
-WAN bridge:  vmbr0
-```
-
-VPN pool не должен пересекаться с LAN, VM networks или существующими маршрутами сервера.
-
----
-
-## 2. Установка
+На Proxmox:
 
 ```bash
 cd /path/to/vps-setup/openvpn
-chmod +x install.sh uninstall.sh bin/* lib/verify-crl-health
+chmod +x install.sh uninstall.sh bin/* lib/pve-openvpn-* lib/verify-crl-health
+sudo ./install.sh
 ```
 
-### Рекомендуемый split-tunnel
+Без аргументов установщик запускает мастер и последовательно спрашивает:
 
-```bash
-sudo ./install.sh \
-  --endpoint vpn.example.com \
-  --wan vmbr0 \
-  --lan 192.168.1.0/24 \
-  --lan 10.20.0.0/24
+1. публичный IPv4 или DNS VPN-сервера;
+2. UDP-порт;
+3. WAN/bridge интерфейс, обычно `vmbr0`;
+4. VPN subnet;
+5. лимит клиентов;
+6. split/full режим;
+7. LAN/VM сети;
+8. DNS для full-tunnel;
+9. совместимость tls-crypt-v2;
+10. нужно ли защищать CA passphrase;
+11. финальное подтверждение перед изменением системы.
+
+Пример вопросов:
+
+```text
+Публичный IPv4 или DNS-имя VPN: vpn.example.com
+UDP-порт OpenVPN [1194]:
+WAN/bridge интерфейс [vmbr0]:
+VPN IPv4 subnet [10.8.0.0/24]:
+Максимум одновременных клиентов [64]:
+
+Режим:
+  1) split
+  2) full
+Выбор [1]: 1
+
+LAN CIDR: 192.168.1.0/24
+LAN CIDR: 10.20.0.0/24
+LAN CIDR:
 ```
 
-Если `--wan` не указан, скрипт пытается определить его по default IPv4 route.
+Установщик показывает итоговую конфигурацию и **ничего не меняет**, пока ты её не подтвердил.
 
-При первой установке Easy-RSA попросит пароль CA. Сохрани пароль в password manager: без него нельзя будет штатно выпускать и отзывать сертификаты.
+### CA
 
-### Публичный IP вместо DNS
+Рекомендуемый вариант — CA private key с passphrase.
 
-```bash
-sudo ./install.sh \
-  --endpoint 203.0.113.10 \
-  --lan 192.168.1.0/24
-```
+Пароль:
 
-### Другой UDP-порт
+- не передаётся аргументом shell;
+- не сохраняется в Git;
+- не должен храниться рядом с PKI;
+- лучше хранить в password manager/offline secret store.
 
-```bash
-sudo ./install.sh \
-  --endpoint vpn.example.com \
-  --port 443 \
-  --lan 192.168.1.0/24
-```
-
-Это UDP/443, не TCP/443.
-
-### Другой VPN subnet
-
-```bash
-sudo ./install.sh \
-  --endpoint vpn.example.com \
-  --vpn-cidr 10.50.0.0/24 \
-  --lan 192.168.1.0/24
-```
-
-### Full-tunnel IPv4
-
-```bash
-sudo ./install.sh \
-  --endpoint vpn.example.com \
-  --mode full \
-  --lan 192.168.1.0/24 \
-  --dns 1.1.1.1 \
-  --dns 9.9.9.9
-```
-
-**Важно:** этот комплект маршрутизирует full-tunnel только для IPv4. Он не является IPv6 kill-switch. Если клиент имеет рабочий IPv6, часть трафика может пойти мимо VPN. См. SECURITY.md.
-
-### CA без пароля
-
-Только если unattended issuance важнее защиты CA при краже файлов:
-
-```bash
-sudo ./install.sh \
-  --endpoint vpn.example.com \
-  --lan 192.168.1.0/24 \
-  --ca-nopass
-```
-
-Это менее безопасный режим.
+Если сознательно выбрать CA без пароля, мастер потребует дополнительное слово `NOPASS`.
 
 ---
 
-## 3. Что создаётся на сервере
+## 2. Главное меню
 
-```text
-/etc/openvpn/pve-openvpn.conf
-/etc/openvpn/server/server.conf
-/etc/openvpn/server/ca.crt
-/etc/openvpn/server/server.crt
-/etc/openvpn/server/server.key
-/etc/openvpn/server/crl.pem
-/etc/openvpn/server/tls-crypt-v2-server.key
-
-/etc/openvpn/easy-rsa/pki/
-/root/openvpn-clients/
-```
-
-Управляющие команды:
-
-```text
-ovpn-add-client
-ovpn-revoke-client
-ovpn-scrub-client-secret
-ovpn-list-clients
-ovpn-status
-ovpn-set-mode
-ovpn-render-server
-ovpn-fw
-```
-
-Services:
-
-```text
-openvpn-server@server.service
-pve-openvpn-fw.service
-```
-
----
-
-## 4. Port forwarding
-
-Если Proxmox стоит за роутером:
-
-```text
-Protocol:      UDP
-External port: 1194
-Internal IP:   IP Proxmox
-Internal port: 1194
-```
-
-При другом `--port` используй соответствующий UDP-порт.
-
-Если провайдер использует CGNAT и у тебя нет доступного входящего публичного адреса, обычный port-forward не решит проблему.
-
----
-
-## 5. Proxmox Firewall
-
-Комплект **намеренно не открывает INPUT хоста автоматически**.
-
-Если PVE Firewall включён, создай штатное правило для OpenVPN:
-
-```text
-Direction: IN
-Action:    ACCEPT
-Protocol:  UDP
-Dest port: 1194
-Source:    при возможности ограничить известными адресами
-```
-
-Для доступа VPN-клиентов к самому Proxmox также разреши необходимые host INPUT порты из VPN subnet, например:
-
-```text
-source 10.8.0.0/24 -> TCP/8006
-source 10.8.0.0/24 -> TCP/22
-```
-
-Не публикуй 8006/22 в интернет без необходимости.
-
-Если после reload PVE Firewall перестал работать forwarding, пересобери собственные chains набора:
+После установки:
 
 ```bash
-systemctl restart pve-openvpn-fw
+sudo ovpn
 ```
 
----
-
-## 6. Создание клиента
-
-```bash
-sudo ovpn-add-client laptop
-```
-
-Если CA защищён паролем, Easy-RSA запросит его для подписи.
-
-Результат:
+Меню:
 
 ```text
-/root/openvpn-clients/laptop.ovpn
+1) Статус сервера
+2) Список клиентов
+3) Добавить клиента
+4) Отозвать клиента
+5) Удалить серверные копии client secrets
+6) Переключить split/full tunnel
+7) Перезапустить OpenVPN
+8) Показать последние логи OpenVPN
+0) Выход
 ```
 
-Файл содержит:
-
-- CA certificate;
-- client certificate;
-- client private key;
-- уникальный tls-crypt-v2 client key;
-- endpoint/port;
-- crypto settings.
-
-Поэтому `.ovpn` — **секретный файл**.
-
-Другие примеры:
-
-```bash
-sudo ovpn-add-client phone
-sudo ovpn-add-client home-pc
-```
+Команда `ovpn` не принимает произвольные команды/аргументы и запускает только фиксированные управляющие скрипты.
 
 ---
 
-## 7. После передачи профиля клиенту
+## 3. Отдельные команды
 
-Если клиент уже безопасно импортировал профиль и ты не хочешь хранить его private key на VPN-сервере:
+Все пользовательские `ovpn-*` команды запускаются **без параметров**.
+
+### Добавить клиента
 
 ```bash
-sudo ovpn-scrub-client-secret laptop
+sudo ovpn-add-client
 ```
 
-После подтверждения `ERASE` удаляются серверные копии:
+Скрипт сам спросит имя:
 
 ```text
-pki/private/laptop.key
-pki/tls-crypt-v2-clients/laptop.key
-/root/openvpn-clients/laptop.ovpn
+Имя нового клиента (например laptop или phone):
 ```
 
-Сертификат **не отзывается**, поэтому импортированный профиль продолжает работать.
+После выпуска получится:
 
-После scrub повторно экспортировать тот же профиль уже нельзя. При потере клиентом профиля отзови старую identity и выпусти новую с другим именем.
+```text
+/root/openvpn-clients/<client>.ovpn
+```
 
----
+Файл содержит client private key и уникальный tls-crypt-v2 transport key, поэтому его нужно считать секретом.
 
-## 8. Список клиентов
+### Список клиентов
 
 ```bash
 sudo ovpn-list-clients
 ```
 
-Статусы:
+После запуска скрипт сначала предложит фильтр: все / ACTIVE / REVOKED / EXPIRED. Никаких аргументов вводить не нужно.
+
+### Отозвать клиента
+
+```bash
+sudo ovpn-revoke-client
+```
+
+Скрипт:
+
+1. показывает список подходящих клиентов;
+2. предлагает выбрать клиента номером;
+3. требует ввести `REVOKE`;
+4. спрашивает, нужно ли сразу разорвать все текущие VPN-сессии;
+5. отзывает сертификат;
+6. генерирует и проверяет новый CRL;
+7. удаляет локальный client profile/transport key.
+
+Имя отозванного клиента повторно не используется.
+
+### Удалить серверные копии client secrets
+
+```bash
+sudo ovpn-scrub-client-secret
+```
+
+Скрипт покажет клиентов и потребует `ERASE`.
+
+Удаляются серверные копии:
 
 ```text
-ACTIVE
-REVOKED
-EXPIRED
+pki/private/<client>.key
+pki/tls-crypt-v2-clients/<client>.key
+/root/openvpn-clients/<client>.ovpn
+```
+
+Это **не revoke**. Уже импортированный клиент продолжит работать.
+
+После scrub повторно экспортировать тот же профиль нельзя.
+
+### Переключить split/full
+
+```bash
+sudo ovpn-set-mode
+```
+
+Скрипт покажет текущий режим и предложит:
+
+```text
+1) split
+2) full
+0) Отмена
+```
+
+Перед применением будет отдельное подтверждение.
+
+### Перезапустить OpenVPN
+
+```bash
+sudo ovpn-restart
+```
+
+Перед рестартом есть подтверждение. Рестарт оборвёт текущие VPN-сессии, после чего клиенты смогут переподключиться.
+
+### Статус
+
+```bash
+sudo ovpn-status
+```
+
+Сначала появляется меню, где можно выбрать: краткий статус, PKI/CRL, systemd, firewall/NAT, активные подключения или полный отчёт. Никаких аргументов вводить не нужно.
+
+---
+
+## 4. Split и full tunnel
+
+### Split
+
+Рекомендуется по умолчанию.
+
+Через VPN идут только сети, которые были добавлены мастером установки.
+
+Например:
+
+```text
+192.168.1.0/24
+10.20.0.0/24
+```
+
+### Full
+
+Весь **IPv4** клиента отправляется через VPN.
+
+Важно: этот комплект сознательно не реализует IPv6 full-tunnel/kill-switch. Если у клиента есть native IPv6, он может идти мимо VPN.
+
+Подробнее: `SECURITY.md`.
+
+---
+
+## 5. Port forward
+
+Если Proxmox находится за роутером, пробрось выбранный UDP-порт на IP Proxmox.
+
+Для стандартного порта:
+
+```text
+Protocol:      UDP
+External:      1194
+Internal host: IP Proxmox
+Internal port: 1194
+```
+
+При CGNAT обычный входящий port-forward может быть невозможен.
+
+---
+
+## 6. Proxmox Firewall
+
+Набор **не открывает широкий INPUT автоматически**.
+
+Если PVE Firewall включён, разреши выбранный UDP OpenVPN port штатным правилом PVE.
+
+Для доступа через VPN к самому Proxmox отдельно разреши только нужные host ports из VPN subnet, например:
+
+```text
+10.8.0.0/24 -> TCP/8006
+10.8.0.0/24 -> TCP/22
+```
+
+Если SSH через VPN не нужен — TCP/22 не открывай.
+
+Не публикуй GUI `:8006` напрямую в интернет без необходимости.
+
+---
+
+## 7. PKI example
+
+Репозиторий содержит:
+
+```text
+openvpn/pki-example/pki/
+```
+
+Это дерево предназначено только для понимания структуры.
+
+Настоящая PKI:
+
+```text
+/etc/openvpn/easy-rsa/pki/
+```
+
+Особенно чувствительные файлы:
+
+```text
+private/ca.key
+private/*.key
+tls-crypt-v2-clients/*.key
+/root/openvpn-clients/*.ovpn
+```
+
+Никогда не копируй рабочую PKI в repository ради backup.
+
+Backup PKI должен быть:
+
+- зашифрован;
+- отдельно защищён ACL;
+- не находиться в Git;
+- регулярно проверяться на восстановление.
+
+---
+
+## 8. Защита Git
+
+`openvpn/.gitignore` блокирует типовые секреты и runtime PKI state:
+
+```text
+pki/
+easy-rsa/
+runtime/
+clients/
+openvpn-clients/
+*.key
+*.ovpn
+*.p12
+*.pfx
+*.pkcs12
+*.pem
+*.csr
+*.req
+*.crt
+index.txt*
+serial*
+crlnumber*
+crl.pem
+```
+
+`.gitignore` не спасает секрет, который уже попал в Git history. Такой ключ нужно считать скомпрометированным и ротировать.
+
+Перед commit:
+
+```bash
+git status --short
+git diff --cached --name-only
 ```
 
 ---
 
-## 9. Отзыв клиента
+## 9. Удаление
+
+Запускай без аргументов:
 
 ```bash
-sudo ovpn-revoke-client laptop
+sudo ./uninstall.sh
 ```
 
-Команда:
+Меню предложит:
 
-1. отзывает certificate через Easy-RSA;
-2. генерирует новый CRL;
-3. атомарно устанавливает новый CRL серверу;
-4. удаляет сохранённый `.ovpn`;
-5. удаляет серверную копию client tls-crypt-v2 key.
-
-Если CA защищён, потребуется пароль CA.
-
-Для немедленного разрыва уже установленных VPN-сессий:
-
-```bash
-sudo ovpn-revoke-client laptop --disconnect-all
+```text
+1) удалить сервисы/команды, сохранить PKI и client profiles
+2) полностью удалить конфигурацию, PKI и client profiles
+3) полностью удалить всё + пакеты OpenVPN/Easy-RSA
+0) отмена
 ```
 
-Это перезапускает OpenVPN и переподключит всех активных клиентов.
+Для вариантов с удалением PKI потребуется отдельно ввести:
+
+```text
+DELETE
+```
+
+Это подтверждение происходит **до начала изменений системы**.
 
 ---
 
-## 10. Статус
+## 10. Проверка после установки
+
+Через меню выбери статус или запусти:
 
 ```bash
 sudo ovpn-status
@@ -369,158 +423,69 @@ sudo ovpn-status
 Дополнительно:
 
 ```bash
-systemctl status openvpn-server@server
-systemctl status pve-openvpn-fw
-journalctl -u openvpn-server@server -f
-ip -br addr show tun0
-ss -lunp | grep 1194
+systemctl is-active openvpn-server@server
+systemctl is-active pve-openvpn-fw
+
 sysctl net.ipv4.ip_forward
+ip -br addr show tun0
+
+iptables -S PVE-OVPN-GUARD
+iptables -S PVE-OVPN-ALLOW
+iptables -t nat -S PVE-OVPN-NAT
+
+openssl crl \
+  -in /etc/openvpn/server/crl.pem \
+  -noout -lastupdate -nextupdate
 ```
+
+С внешнего клиента проверь:
+
+- VPN handshake;
+- доступ только к ожидаемым LAN в split mode;
+- отсутствие доступа к запрещённым сетям;
+- GUI/SSH согласно PVE Firewall policy;
+- DNS;
+- публичный IPv4 в full mode;
+- отдельно поведение IPv6.
 
 ---
 
-## 11. Split / Full mode
+## 11. Внутренние helpers
 
-По умолчанию:
+Эти файлы **не являются пользовательскими `ovpn` командами**:
 
 ```text
-split
+/usr/local/lib/pve-openvpn/pve-openvpn-fw
+/usr/local/lib/pve-openvpn/pve-openvpn-render-server
 ```
 
-Через VPN идут только сети из `OVPN_LANS`.
+Их вызывает systemd и управляющие скрипты.
 
-Переключить на full IPv4 tunnel:
-
-```bash
-sudo ovpn-set-mode full
-```
-
-Вернуть split:
-
-```bash
-sudo ovpn-set-mode split
-```
-
-Команда пересобирает server config и firewall/NAT rules.
+Они принимают технические параметры там, где это необходимо для systemd, но вручную использовать их не требуется.
 
 ---
 
-## 12. Ручное изменение конфигурации
+## 12. Автоматизация
 
-Runtime settings:
-
-```text
-/etc/openvpn/pve-openvpn.conf
-```
-
-Файл source-ится root-скриптами, поэтому он должен:
-
-- принадлежать root;
-- не быть symlink;
-- иметь права `0600` или строже.
-
-После изменения параметров server config:
+Для человека рекомендуемый интерфейс — только интерактивный:
 
 ```bash
-sudo ovpn-render-server
-sudo systemctl restart openvpn-server@server
+sudo ./install.sh
+sudo ovpn
 ```
 
-Если менялись mode, WAN, LAN или VPN subnet:
-
-```bash
-sudo systemctl restart pve-openvpn-fw
-sudo systemctl restart openvpn-server@server
-```
+У `install.sh` сохранены CLI flags для CI/provisioning, но это дополнительный режим. Пользовательские `ovpn-*` команды намеренно не принимают параметры, чтобы destructive операции проходили через явный выбор и подтверждение.
 
 ---
 
-## 13. Backup PKI
+## 13. Self-test перед commit/deploy
 
-Нужны как минимум:
-
-```text
-/etc/openvpn/easy-rsa/pki/
-/etc/openvpn/server/tls-crypt-v2-server.key
-/etc/openvpn/pve-openvpn.conf
-```
-
-Backup должен быть **зашифрованным** и храниться вне Git.
-
-Особенно критичен:
-
-```text
-/etc/openvpn/easy-rsa/pki/private/ca.key
-```
-
-Если потерять CA key, ты не сможешь нормально продолжать управление существующей PKI.
-Если CA key украден, PKI нужно считать скомпрометированной и разворачивать новую.
-
----
-
-## 14. Удаление
-
-Остановить интеграцию, сохранив PKI и client profiles:
+Без изменения systemd/firewall/PKI можно выполнить:
 
 ```bash
-sudo ./uninstall.sh
+./tests/selftest.sh
 ```
 
-Полностью удалить PKI/CA/server/client secrets:
+Проверяются Bash syntax, базовая CIDR/endpoint-логика, zero-argument policy пользовательских `ovpn*`, отсутствие внутренних helpers в `bin/`, Git ignore-policy для секретов и структура `pki-example/`.
 
-```bash
-sudo ./uninstall.sh --purge
-```
-
-Нужно вручную ввести:
-
-```text
-DELETE
-```
-
-Также удалить пакеты:
-
-```bash
-sudo ./uninstall.sh --purge --purge-packages
-```
-
----
-
-## 15. Быстрый сценарий
-
-```bash
-cd openvpn
-
-sudo ./install.sh \
-  --endpoint vpn.example.com \
-  --wan vmbr0 \
-  --lan 192.168.1.0/24 \
-  --lan 10.20.0.0/24
-
-sudo ovpn-add-client laptop
-sudo ovpn-add-client phone
-
-sudo ovpn-status
-sudo ovpn-list-clients
-```
-
-После безопасного импорта профиля:
-
-```bash
-sudo ovpn-scrub-client-secret laptop
-```
-
-Потерянный клиент:
-
-```bash
-sudo ovpn-revoke-client laptop --disconnect-all
-```
-
-## Ограничения
-
-- IPv4 only.
-- Нет IPv6 tunnel/kill-switch.
-- Нет web UI.
-- Нет offline-CA workflow в автоматическом установщике.
-- Скрипты не управляют правилами PVE Firewall UI/API.
-- Для production с повышенными требованиями лучше держать CA offline и подписывать CSR отдельно.
+Подробная модель безопасности и ограничения: [SECURITY.md](SECURITY.md).

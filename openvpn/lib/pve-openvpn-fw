@@ -17,8 +17,9 @@ exec 8>/run/pve-openvpn/firewall.lock
 flock -x 8
 
 action="${1:-}"
-[[ "$action" == "up" || "$action" == "down" ]] || die "Использование: ovpn-fw up|down"
+[[ "$action" == "up" || "$action" == "down" ]] || die "Внутренний helper: pve-openvpn-fw up|down"
 
+INPUT_GUARD_CHAIN="PVE-OVPN-IN-GUARD"
 GUARD_CHAIN="PVE-OVPN-GUARD"
 ALLOW_CHAIN="PVE-OVPN-ALLOW"
 NAT_CHAIN="PVE-OVPN-NAT"
@@ -58,14 +59,26 @@ delete_staging_hooks() {
     iptables_cmd -D FORWARD -m comment --comment "$STAGING_COMMENT" \
       -i "$OVPN_TUN_IF" -j DROP || return 1
   done
+
+  while iptables_cmd -C INPUT -m comment --comment "$STAGING_COMMENT" \
+    -i "$OVPN_TUN_IF" '!' -s "$OVPN_VPN_CIDR" -j DROP 2>/dev/null; do
+    iptables_cmd -D INPUT -m comment --comment "$STAGING_COMMENT" \
+      -i "$OVPN_TUN_IF" '!' -s "$OVPN_VPN_CIDR" -j DROP || return 1
+  done
+  while iptables_cmd -C INPUT -m comment --comment "$STAGING_COMMENT" \
+    -s "$OVPN_VPN_CIDR" '!' -i "$OVPN_TUN_IF" -j DROP 2>/dev/null; do
+    iptables_cmd -D INPUT -m comment --comment "$STAGING_COMMENT" \
+      -s "$OVPN_VPN_CIDR" '!' -i "$OVPN_TUN_IF" -j DROP || return 1
+  done
 }
 
 cleanup() {
+  delete_hook filter INPUT "$INPUT_GUARD_CHAIN"
   delete_hook filter FORWARD "$GUARD_CHAIN"
   delete_hook filter FORWARD "$ALLOW_CHAIN"
   delete_hook nat POSTROUTING "$NAT_CHAIN"
 
-  for chain in "$GUARD_CHAIN" "$ALLOW_CHAIN"; do
+  for chain in "$INPUT_GUARD_CHAIN" "$GUARD_CHAIN" "$ALLOW_CHAIN"; do
     if chain_exists filter "$chain"; then
       iptables_cmd -F "$chain"
       iptables_cmd -X "$chain"
@@ -100,6 +113,17 @@ firewall_failed() {
   iptables_cmd -A "$GUARD_CHAIN" -i "$OVPN_TUN_IF" -j DROP
   delete_hook filter FORWARD "$GUARD_CHAIN"
   iptables_cmd -I FORWARD 1 -m comment --comment "$COMMENT" -j "$GUARD_CHAIN"
+
+  if ! chain_exists filter "$INPUT_GUARD_CHAIN"; then
+    iptables_cmd -N "$INPUT_GUARD_CHAIN"
+  fi
+  iptables_cmd -F "$INPUT_GUARD_CHAIN"
+  # В аварийном состоянии полностью закрываем host-доступ из VPN, а также
+  # блокируем spoofed VPN source с других интерфейсов.
+  iptables_cmd -A "$INPUT_GUARD_CHAIN" -i "$OVPN_TUN_IF" -j DROP
+  iptables_cmd -A "$INPUT_GUARD_CHAIN" -s "$OVPN_VPN_CIDR" -j DROP
+  delete_hook filter INPUT "$INPUT_GUARD_CHAIN"
+  iptables_cmd -I INPUT 1 -m comment --comment "$COMMENT" -j "$INPUT_GUARD_CHAIN"
   exit "$rc"
 }
 trap firewall_failed ERR
@@ -110,16 +134,27 @@ iptables_cmd -I FORWARD 1 -m comment --comment "$STAGING_COMMENT" \
   -i "$OVPN_TUN_IF" -j DROP
 iptables_cmd -I FORWARD 1 -m comment --comment "$STAGING_COMMENT" \
   -s "$OVPN_VPN_CIDR" -j DROP
+iptables_cmd -I INPUT 1 -m comment --comment "$STAGING_COMMENT" \
+  -i "$OVPN_TUN_IF" '!' -s "$OVPN_VPN_CIDR" -j DROP
+iptables_cmd -I INPUT 1 -m comment --comment "$STAGING_COMMENT" \
+  -s "$OVPN_VPN_CIDR" '!' -i "$OVPN_TUN_IF" -j DROP
 
 # Полностью пересобираем только собственные chains. ERR trap оставляет
 # аварийный DROP, если любой шаг после cleanup завершится ошибкой.
 cleanup
 
+iptables_cmd -N "$INPUT_GUARD_CHAIN"
 iptables_cmd -N "$GUARD_CHAIN"
 iptables_cmd -N "$ALLOW_CHAIN"
 iptables_cmd -t nat -N "$NAT_CHAIN"
 
-# Сначала наполняем ещё не подключённый guard запретом. Затем подключаем его:
+# INPUT guard не открывает host-порты. Он только блокирует source spoofing:
+# адреса VPN pool допустимы только из tun, а tun не может прислать source вне pool.
+iptables_cmd -A "$INPUT_GUARD_CHAIN" -i "$OVPN_TUN_IF" '!' -s "$OVPN_VPN_CIDR" -j DROP
+iptables_cmd -A "$INPUT_GUARD_CHAIN" -s "$OVPN_VPN_CIDR" '!' -i "$OVPN_TUN_IF" -j DROP
+iptables_cmd -I INPUT 1 -m comment --comment "$COMMENT" -j "$INPUT_GUARD_CHAIN"
+
+# Сначала наполняем ещё не подключённый forwarding guard запретом. Затем подключаем его:
 # VPN source ни на одном последующем шаге не остаётся без fail-closed правила.
 iptables_cmd -A "$GUARD_CHAIN" -s "$OVPN_VPN_CIDR" -j DROP
 iptables_cmd -A "$GUARD_CHAIN" -i "$OVPN_TUN_IF" -j DROP

@@ -8,12 +8,49 @@ require_root
 require_cmd openvpn
 require_cmd openssl
 load_config
-acquire_pki_lock
+require_secure_root_dir "$EASYRSA_DIR"
+require_secure_root_dir "$EASYRSA_PKI_DIR"
+require_secure_root_dir "$SERVER_DIR"
+require_interactive_tty
 
-name="${1:-}"
-[[ -n "$name" ]] || die "Использование: ovpn-add-client CLIENT_NAME"
-[[ $# -eq 1 ]] || die "Использование: ovpn-add-client CLIENT_NAME"
+(($# == 0)) || die "ovpn-add-client не принимает аргументы. Запусти просто: ovpn-add-client"
+
+echo "=== Добавление OpenVPN-клиента ==="
+echo
+name="$(prompt_nonempty "Имя нового клиента (например laptop или phone): ")"
 validate_client_name "$name"
+
+pre_status="$(pki_client_status "$name" 2>/dev/null || true)"
+case "$pre_status" in
+  V)
+    warn "Клиент '$name' уже существует и активен."
+    warn "Переэкспорт НЕ аннулирует старые копии .ovpn: прежний cert/private key остаётся действующим."
+    warn "Если старый профиль мог утечь, отзови клиента и создай новую identity с другим именем."
+    prompt_yes_no "Переэкспортировать профиль этого же клиента?" no || {
+      info "Отменено."
+      exit 0
+    }
+    ;;
+  R)
+    die "Имя '$name' уже отозвано и не переиспользуется. Выбери новое имя."
+    ;;
+  E)
+    die "Сертификат '$name' истёк. Для новой identity выбери новое имя."
+    ;;
+  "")
+    echo "Будет создана новая client identity: $name"
+    prompt_yes_no "Продолжить?" yes || {
+      info "Отменено."
+      exit 0
+    }
+    ;;
+  *)
+    die "Неизвестный статус PKI для '$name': $pre_status"
+    ;;
+esac
+
+# Не держим PKI lock во время пользовательских prompt-ов.
+acquire_pki_lock
 
 EASYRSA="$EASYRSA_DIR/easyrsa"
 [[ -x "$EASYRSA" && ! -L "$EASYRSA" ]] || die "Не найден безопасный Easy-RSA executable: $EASYRSA"
@@ -28,6 +65,13 @@ tls_dir="$EASYRSA_PKI_DIR/tls-crypt-v2-clients"
 tls_key="$tls_dir/$name.key"
 
 status="$(pki_client_status "$name" 2>/dev/null || true)"
+if [[ -z "$pre_status" && -n "$status" ]]; then
+  die "Состояние PKI изменилось после подтверждения: '$name' уже появился. Запусти команду заново."
+fi
+if [[ "$pre_status" == "V" && "$status" != "V" ]]; then
+  die "Состояние PKI клиента '$name' изменилось после подтверждения. Запусти команду заново."
+fi
+
 case "$status" in
   R)
     die "Имя '$name' уже было отозвано. Для новой идентичности используй новое имя клиента."
@@ -71,10 +115,13 @@ esac
 openssl x509 -in "$issued" -noout -checkend 0 >/dev/null 2>&1 ||
   die "Сертификат клиента уже недействителен/истёк."
 
-mkdir -p -- "$tls_dir" "$OVPN_CLIENT_DIR"
-[[ -d "$tls_dir" && ! -L "$tls_dir" ]] || die "Небезопасный каталог transport keys: $tls_dir"
-[[ -d "$OVPN_CLIENT_DIR" && ! -L "$OVPN_CLIENT_DIR" ]] || die "Небезопасный каталог profiles: $OVPN_CLIENT_DIR"
-chmod 0700 "$tls_dir" "$OVPN_CLIENT_DIR"
+if [[ -e "$tls_dir" || -L "$tls_dir" ]]; then
+  require_secure_root_dir "$tls_dir"
+fi
+if [[ -e "$OVPN_CLIENT_DIR" || -L "$OVPN_CLIENT_DIR" ]]; then
+  require_secure_root_dir "$OVPN_CLIENT_DIR"
+fi
+install -d -o root -g root -m 0700 "$tls_dir" "$OVPN_CLIENT_DIR"
 
 tmp_tls=""
 tmp_profile=""
