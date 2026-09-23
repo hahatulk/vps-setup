@@ -10,7 +10,17 @@ DATE="/usr/bin/date"
 SED="/usr/bin/sed"
 
 [[ -x "$OPENSSL" && -x "$DATE" && -x "$SED" ]] || exit 1
-[[ -s "$CRL" && -r "$CRL" && -s "$CA" && -r "$CA" ]] || exit 1
+secure_file() {
+  local file="$1" owner mode mode_dec
+  [[ -f "$file" && ! -L "$file" && -s "$file" && -r "$file" ]] || return 1
+  owner="$(/usr/bin/stat -c '%u' "$file" 2>/dev/null)" || return 1
+  mode="$(/usr/bin/stat -c '%a' "$file" 2>/dev/null)" || return 1
+  [[ "$owner" == 0 && "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+  mode_dec=$((8#$mode))
+  (( (mode_dec & 7022) == 0 ))
+}
+secure_file "$CRL" || exit 1
+secure_file "$CA" || exit 1
 
 "$OPENSSL" crl -in "$CRL" -noout -verify -CAfile "$CA" >/dev/null 2>&1 || exit 1
 

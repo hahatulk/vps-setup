@@ -5,15 +5,8 @@ set -Eeuo pipefail
 source /usr/local/lib/pve-openvpn/common.sh
 
 require_root
-require_cmd flock
 require_cmd systemctl
-if [[ -e /run/pve-openvpn || -L /run/pve-openvpn ]]; then
-  [[ -d /run/pve-openvpn && ! -L /run/pve-openvpn ]] ||
-    die "Небезопасный runtime directory: /run/pve-openvpn"
-fi
-install -d -o root -g root -m 0700 /run/pve-openvpn
-exec 7>/run/pve-openvpn/config.lock
-flock -x 7
+acquire_config_lock
 load_config
 
 mode="${1:-}"

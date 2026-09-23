@@ -17,9 +17,9 @@ validate_client_name "$name"
 
 EASYRSA="$EASYRSA_DIR/easyrsa"
 [[ -x "$EASYRSA" && ! -L "$EASYRSA" ]] || die "Не найден безопасный Easy-RSA executable: $EASYRSA"
-[[ -f "$SERVER_DIR/ca.crt" && ! -L "$SERVER_DIR/ca.crt" && -s "$SERVER_DIR/ca.crt" ]] ||
+secure_root_file "$SERVER_DIR/ca.crt" ||
   die "Не найден безопасный CA certificate."
-[[ -f "$SERVER_DIR/tls-crypt-v2-server.key" && ! -L "$SERVER_DIR/tls-crypt-v2-server.key" && -s "$SERVER_DIR/tls-crypt-v2-server.key" ]] ||
+secure_private_file "$SERVER_DIR/tls-crypt-v2-server.key" ||
   die "Не найден безопасный tls-crypt-v2 server key."
 
 issued="$EASYRSA_PKI_DIR/issued/$name.crt"
@@ -64,17 +64,16 @@ case "$status" in
     ;;
 esac
 
-[[ -f "$issued" && ! -L "$issued" && -s "$issued" ]] ||
+secure_root_file "$issued" ||
   die "После операции отсутствует безопасный certificate клиента."
-[[ -f "$key" && ! -L "$key" && -s "$key" ]] ||
+secure_private_file "$key" ||
   die "После операции отсутствует безопасный private key клиента."
 openssl x509 -in "$issued" -noout -checkend 0 >/dev/null 2>&1 ||
   die "Сертификат клиента уже недействителен/истёк."
 
-mkdir -p -- "$tls_dir" "$OVPN_CLIENT_DIR"
-[[ -d "$tls_dir" && ! -L "$tls_dir" ]] || die "Небезопасный каталог transport keys: $tls_dir"
-[[ -d "$OVPN_CLIENT_DIR" && ! -L "$OVPN_CLIENT_DIR" ]] || die "Небезопасный каталог profiles: $OVPN_CLIENT_DIR"
-chmod 0700 "$tls_dir" "$OVPN_CLIENT_DIR"
+install -d -o root -g root -m 0700 "$tls_dir" "$OVPN_CLIENT_DIR"
+secure_private_dir "$tls_dir" || die "Небезопасный каталог transport keys: $tls_dir"
+secure_private_dir "$OVPN_CLIENT_DIR" || die "Небезопасный каталог profiles: $OVPN_CLIENT_DIR"
 
 tmp_tls=""
 tmp_profile=""

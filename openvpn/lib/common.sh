@@ -56,14 +56,64 @@ acquire_pki_lock() {
   flock -x -w 30 9 || die "PKI занята другой операцией (lock timeout 30s). Повтори позже."
 }
 
-config_file_is_secure() {
-  local file="${1:-$CONFIG_FILE}" owner mode mode_dec
+acquire_config_lock() {
+  # Child helpers inherit fd 7 and this marker; opening the same lock again would deadlock.
+  [[ ${OVPN_CONFIG_LOCK_HELD:-0} == 1 ]] && return 0
+  require_cmd flock
+  if [[ -e "$PKI_LOCK_DIR" || -L "$PKI_LOCK_DIR" ]]; then
+    [[ -d "$PKI_LOCK_DIR" && ! -L "$PKI_LOCK_DIR" && $(stat -c '%u:%a' "$PKI_LOCK_DIR" 2>/dev/null) == "0:700" ]] ||
+      die "Небезопасный runtime/lock directory: $PKI_LOCK_DIR"
+  else
+    install -d -o root -g root -m 0700 "$PKI_LOCK_DIR"
+  fi
+  local config_lock="$PKI_LOCK_DIR/config.lock"
+  [[ ! -e "$config_lock" || ( -f "$config_lock" && ! -L "$config_lock" ) ]] ||
+    die "Небезопасный config lock file: $config_lock"
+  exec 7>"$config_lock"
+  [[ "$(stat -c '%u' "$config_lock")" == "0" ]] || die "Config lock file должен принадлежать root."
+  chmod 0600 "$config_lock"
+  flock -x -w 30 7 || die "Конфигурация занята другой операцией (lock timeout 30s). Повтори позже."
+  export OVPN_CONFIG_LOCK_HELD=1
+}
+
+secure_root_file() {
+  local file="$1" owner mode mode_dec
   [[ -f "$file" && ! -L "$file" ]] || return 1
-  owner="$(stat -c '%u' "$file")" || return 1
-  mode="$(stat -c '%a' "$file")" || return 1
+  owner="$(stat -c '%u' "$file" 2>/dev/null)" || return 1
+  mode="$(stat -c '%a' "$file" 2>/dev/null)" || return 1
   [[ "$owner" == "0" && "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
   mode_dec=$((8#$mode))
+  (( (mode_dec & 7022) == 0 ))
+}
+
+secure_private_file() {
+  local file="$1" mode mode_dec
+  secure_root_file "$file" || return 1
+  mode="$(stat -c '%a' "$file" 2>/dev/null)" || return 1
+  mode_dec=$((8#$mode))
   (( (mode_dec & 0077) == 0 ))
+}
+
+secure_root_dir() {
+  local dir="$1" owner mode mode_dec
+  [[ -d "$dir" && ! -L "$dir" ]] || return 1
+  owner="$(stat -c '%u' "$dir" 2>/dev/null)" || return 1
+  mode="$(stat -c '%a' "$dir" 2>/dev/null)" || return 1
+  [[ "$owner" == "0" && "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+  mode_dec=$((8#$mode))
+  (( (mode_dec & 7022) == 0 ))
+}
+
+secure_private_dir() {
+  local dir="$1" mode mode_dec
+  secure_root_dir "$dir" || return 1
+  mode="$(stat -c '%a' "$dir" 2>/dev/null)" || return 1
+  mode_dec=$((8#$mode))
+  (( (mode_dec & 0077) == 0 ))
+}
+
+config_file_is_secure() {
+  secure_private_file "${1:-$CONFIG_FILE}"
 }
 
 validate_safe_absolute_dir() {
@@ -77,6 +127,12 @@ validate_safe_absolute_dir() {
 load_config() {
   config_file_is_secure "$CONFIG_FILE" ||
     die "Не найден безопасный root-owned regular file 0600 $CONFIG_FILE. Сначала запусти install.sh."
+  secure_root_dir "$EASYRSA_DIR" ||
+    die "Небезопасный каталог Easy-RSA: $EASYRSA_DIR"
+  secure_private_dir "$EASYRSA_PKI_DIR" ||
+    die "PKI должна принадлежать root и не быть доступна group/other: $EASYRSA_PKI_DIR"
+  secure_root_dir "$SERVER_DIR" ||
+    die "Server directory небезопасна: $SERVER_DIR"
 
   # Файл source-ится как shell assignments, поэтому перед этим жёстко проверяются owner/mode.
   # shellcheck disable=SC1090
@@ -256,10 +312,12 @@ private_key_is_unencrypted() {
 
 crl_is_healthy() {
   local crl_file="$1" ca_file="${2:-}" next_update last_update next_epoch last_epoch now_epoch
-  [[ -f "$crl_file" && ! -L "$crl_file" && -s "$crl_file" && -r "$crl_file" ]] || return 1
+  secure_root_file "$crl_file" || return 1
+  [[ -s "$crl_file" && -r "$crl_file" ]] || return 1
   openssl crl -in "$crl_file" -noout >/dev/null 2>&1 || return 1
   if [[ -n "$ca_file" ]]; then
-    [[ -f "$ca_file" && ! -L "$ca_file" && -s "$ca_file" && -r "$ca_file" ]] || return 1
+    secure_root_file "$ca_file" || return 1
+    [[ -s "$ca_file" && -r "$ca_file" ]] || return 1
     openssl crl -in "$crl_file" -noout -verify -CAfile "$ca_file" >/dev/null 2>&1 || return 1
   fi
   next_update="$(openssl crl -in "$crl_file" -noout -nextupdate 2>/dev/null | sed -n 's/^nextUpdate=//p')"
@@ -274,6 +332,7 @@ crl_is_healthy() {
 
 pki_client_status() {
   local name="$1" index="$EASYRSA_PKI_DIR/index.txt"
+  secure_root_file "$index" || return 1
   [[ -r "$index" ]] || return 1
 
   awk -F '\t' -v target="$name" '
