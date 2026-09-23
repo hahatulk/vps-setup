@@ -135,6 +135,9 @@ update_tooling_only() {
 
   if [[ "$mode" == "update" ]]; then
     info "Скрипты обновлены. Работающий OpenVPN не изменялся и не перезапускался."
+    if ! command -v curl >/dev/null 2>&1; then
+      warn "curl не установлен: ovpn-upload-nextcloud работать не будет, пока ты вручную не установишь пакет curl."
+    fi
   else
     info "Управляющие скрипты установлены."
   fi
@@ -454,7 +457,7 @@ assert_managed_file_or_absent "/etc/systemd/system/openvpn-server@$SERVER_NAME.s
 
 export DEBIAN_FRONTEND=noninteractive
 require_cmd dpkg-query
-packages=(openvpn easy-rsa iptables ca-certificates openssl util-linux iproute2 kmod)
+packages=(openvpn easy-rsa iptables ca-certificates openssl util-linux iproute2 kmod curl)
 missing_packages=()
 for pkg in "${packages[@]}"; do
   if ! dpkg-query -W -f='${Status}\n' "$pkg" 2>/dev/null | grep -Fqx 'install ok installed'; then

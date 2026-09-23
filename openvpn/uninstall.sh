@@ -134,6 +134,7 @@ for command_path in \
   /usr/local/sbin/ovpn-status \
   /usr/local/sbin/ovpn-set-mode \
   /usr/local/sbin/ovpn-set-proto \
+  /usr/local/sbin/ovpn-upload-nextcloud \
   /usr/local/sbin/ovpn-scrub-client-secret \
   /usr/local/sbin/ovpn-restart; do
   if [[ -f "$command_path" && ! -L "$command_path" ]] &&

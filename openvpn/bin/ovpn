@@ -34,7 +34,8 @@ while true; do
   echo "  6) Переключить split/full tunnel"
   echo "  7) TCP/UDP сервера + конвертация .ovpn"
   echo "  8) Перезапустить OpenVPN"
-  echo "  9) Показать последние логи OpenVPN"
+  echo "  9) Отправить файл в Nextcloud"
+  echo " 10) Показать последние логи OpenVPN"
   echo "  0) Выход"
   echo
 
@@ -48,7 +49,8 @@ while true; do
     6) run_action /usr/local/sbin/ovpn-set-mode ;;
     7) run_action /usr/local/sbin/ovpn-set-proto ;;
     8) run_action /usr/local/sbin/ovpn-restart ;;
-    9)
+    9) run_action /usr/local/sbin/ovpn-upload-nextcloud ;;
+    10)
       echo
       journalctl -u "openvpn-server@${OVPN_SERVER_NAME}.service" -n 80 --no-pager || true
       echo

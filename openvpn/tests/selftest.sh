@@ -45,7 +45,7 @@ echo
 echo "== Interactive ovpn policy =="
 for f in bin/ovpn bin/ovpn-add-client bin/ovpn-list-clients bin/ovpn-restart \
          bin/ovpn-revoke-client bin/ovpn-scrub-client-secret bin/ovpn-set-mode \
-         bin/ovpn-set-proto bin/ovpn-status; do
+         bin/ovpn-set-proto bin/ovpn-upload-nextcloud bin/ovpn-status; do
   [[ -f "$f" ]] || fail "missing $f"
   grep -Fq '($# == 0)' "$f" || fail "$f does not explicitly reject arguments"
   grep -Fq 'require_interactive_tty' "$f" || fail "$f is not explicitly interactive/TTY-only"
@@ -53,6 +53,30 @@ done
 [[ ! -e bin/ovpn-fw ]] || fail "internal firewall helper leaked into user-facing bin/"
 [[ ! -e bin/ovpn-render-server ]] || fail "internal render helper leaked into user-facing bin/"
 ok "ovpn commands are zero-argument user interfaces"
+
+echo
+echo "== Nextcloud uploader safety =="
+uploader="bin/ovpn-upload-nextcloud"
+grep -Fq "X-Requested-With: XMLHttpRequest" "$uploader" || fail "Nextcloud uploader misses X-Requested-With"
+grep -Fq "X-NC-Nickname:" "$uploader" || fail "Nextcloud uploader misses X-NC-Nickname"
+grep -Fq "Public-share токен" "$uploader" || fail "Nextcloud uploader token prompt missing"
+grep -Fq "read -r -s" "$uploader" || fail "Nextcloud uploader secrets are not hidden"
+grep -Fq 'curl --config "$CURL_URL_CONFIG"' "$uploader" || fail "Nextcloud token URL is not passed through temp curl config"
+grep -Fq "HTTP 200" README.md || fail "Nextcloud success codes are not documented"
+
+urlencode_fn="$(
+  awk '
+    /^urlencode_segment\(\) \{/ {capture=1}
+    capture {print}
+    capture && /^\}$/ {exit}
+  ' "$uploader"
+)"
+[[ -n "$urlencode_fn" ]] || fail "cannot extract urlencode_segment"
+eval "$urlencode_fn"
+encoded="$(urlencode_segment 'тест файл.txt')"
+[[ "$encoded" == '%D1%82%D0%B5%D1%81%D1%82%20%D1%84%D0%B0%D0%B9%D0%BB.txt' ]] ||
+  fail "UTF-8 URL encoding: $encoded"
+ok "Nextcloud headers/secrets/UTF-8 encoding"
 
 echo
 echo "== Installer update-only ordering =="

@@ -178,9 +178,31 @@ openssl crl -in /etc/openvpn/server/crl.pem -noout -lastupdate -nextupdate
 
 ## Interactive management
 
-Пользовательские команды `ovpn`, `ovpn-add-client`, `ovpn-revoke-client`, `ovpn-scrub-client-secret`, `ovpn-set-mode` и `ovpn-restart` требуют настоящий TTY и не принимают destructive параметры из stdin/CLI. Это снижает риск случайного запуска из pipe/cron и делает опасные действия явными через меню и подтверждения.
+Пользовательские команды `ovpn`, `ovpn-add-client`, `ovpn-revoke-client`, `ovpn-scrub-client-secret`, `ovpn-set-mode`, `ovpn-set-proto`, `ovpn-upload-nextcloud` и `ovpn-restart` требуют настоящий TTY и не принимают параметры из CLI. Это снижает риск случайного запуска из pipe/cron и делает чувствительные/опасные действия явными через меню и подтверждения.
 
 Внутренние systemd helpers находятся в `/usr/local/lib/pve-openvpn/` и не являются пользовательскими `ovpn-*` командами.
+
+## Nextcloud public-share upload
+
+`ovpn-upload-nextcloud` предназначен для интерактивной отправки выбранного файла в public-share WebDAV Nextcloud.
+
+Безопасные свойства:
+
+- разрешён только HTTPS;
+- TLS verification curl не отключается;
+- share token и optional share password вводятся скрыто;
+- token/password не передаются в argv curl и не должны быть видны через обычный `ps`;
+- чувствительные URL/auth данные живут только во временных `0600` curl-config файлах в `/run/pve-openvpn/`;
+- временные файлы удаляются через trap;
+- remote path не принимает `.`/`..` и URL-encode’ится по UTF-8 bytes;
+- HTTP success проверяется явно;
+- при выборе key/profile форматов показывается дополнительное предупреждение.
+
+Важно: public-share token фактически даёт права, настроенные владельцем share. Утёкший token нужно считать скомпрометированным и заменить/отозвать в Nextcloud. Для password-protected public share скрипт использует Basic auth с username `anonymous`, как предусмотрено Nextcloud public WebDAV.
+
+Никогда не загружай CA private key или client profile в public share, если модель доступа к этому share не соответствует чувствительности файла.
+
+---
 
 ## Permissions
 
