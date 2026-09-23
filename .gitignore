@@ -3,3 +3,19 @@
 *.iml
 out
 gen
+
+# Local editor / test artifacts
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Secrets/exports from administrative scripts (also outside openvpn/)
+*.key
+*.ovpn
+*.p12
+*.pfx
+*.pkcs12
+/backups/
+/openvpn-clients/

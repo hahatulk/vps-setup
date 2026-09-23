@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+# shellcheck disable=SC1091
+source /usr/local/lib/pve-openvpn/common.sh
+
+require_root
+require_cmd openssl
+load_config
+
+echo "=== OpenVPN ==="
+openvpn --version | head -n1 || true
+echo
+printf 'Endpoint:       %s:%s/%s\n' "$OVPN_ENDPOINT" "$OVPN_PORT" "$OVPN_PROTO"
+printf 'WAN interface:  %s\n' "$OVPN_WAN_IF"
+printf 'VPN subnet:     %s\n' "$OVPN_VPN_CIDR"
+printf 'Mode:           %s\n' "$OVPN_MODE"
+printf 'Tunnel:         %s\n' "$OVPN_TUN_IF"
+printf 'Max clients:    %s\n' "$OVPN_MAX_CLIENTS"
+printf 'LAN routes:     %s\n' "${OVPN_LANS[*]:-(none)}"
+printf 'tls-crypt-v2:   %s\n' "$OVPN_TLS_CRYPT_V2_COOKIE"
+echo
+
+echo "=== PKI health ==="
+if [[ -s "$SERVER_DIR/server.crt" ]]; then
+  openssl x509 -in "$SERVER_DIR/server.crt" -noout -subject -enddate
+else
+  echo "Server certificate missing"
+fi
+if [[ -s "$SERVER_DIR/crl.pem" ]]; then
+  openssl crl -in "$SERVER_DIR/crl.pem" -noout -nextupdate || true
+else
+  echo "CRL MISSING: service pre-check should block startup"
+fi
+echo
+
+echo "=== File permissions ==="
+for f in "$CONFIG_FILE" "$SERVER_DIR/server.key" "$SERVER_DIR/tls-crypt-v2-server.key" "$SERVER_DIR/crl.pem"; do
+  if [[ -e "$f" ]]; then
+    stat -c '%A %U:%G %n' "$f"
+  else
+    echo "MISSING $f"
+  fi
+done
+echo
+
+echo "=== Services ==="
+systemctl --no-pager --full status "openvpn-server@${OVPN_SERVER_NAME}.service" || true
+echo
+systemctl --no-pager --full status pve-openvpn-fw.service || true
+echo
+
+echo "=== Tunnel ==="
+ip -br addr show "$OVPN_TUN_IF" 2>/dev/null || echo "$OVPN_TUN_IF отсутствует"
+echo
+
+echo "=== Listener ==="
+ss -lntup | grep -E "[:.]$OVPN_PORT([[:space:]]|$)" || echo "Listener на порту $OVPN_PORT не найден"
+echo
+
+echo "=== Connected clients ==="
+status_file="/var/log/openvpn/status.log"
+if [[ -r "$status_file" ]]; then
+  awk -F, '
+    $1=="CLIENT_LIST" {
+      printf "%-24s %-24s %-16s %-16s\n", $2, $3, $4, $5
+      found=1
+    }
+    END { if (!found) print "Нет активных клиентов." }
+  ' "$status_file"
+else
+  echo "Status file недоступен."
+fi

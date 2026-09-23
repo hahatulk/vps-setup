@@ -1,4 +1,4 @@
-[DEFAULT]
+в[DEFAULT]
 bantime   = 1h
 findtime  = 10m
 maxretry  = 3
@@ -6,6 +6,8 @@ banaction = ufw
 backend   = auto
 
 [sshd]
+# Debian/Ubuntu systemd hosts may have no /var/log/auth.log (no rsyslog).
+backend  = systemd
 enabled  = true
 port     = 2001
 mode     = aggressive

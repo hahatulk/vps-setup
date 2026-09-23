@@ -1,4 +1,5 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -u
 
 BACKUP_ROOT="./backups"
 PROJECT_NAME=$(basename "$(pwd)")
@@ -26,6 +27,10 @@ else
     BACKUP_DATE="$LATEST_BACKUP"
 fi
 
+if [[ -z "$BACKUP_DATE" || "$BACKUP_DATE" == */* || "$BACKUP_DATE" == "." || "$BACKUP_DATE" == ".." ]]; then
+    echo "❌ Некорректное имя бэкапа"
+    exit 1
+fi
 BACKUP_DIR="$BACKUP_ROOT/$PROJECT_NAME/$BACKUP_DATE"
 
 if [ ! -d "$BACKUP_DIR" ]; then
@@ -59,8 +64,8 @@ else
     read -p "Имя compose-файла: " COMPOSE
 fi
 
-if [[ -z "$COMPOSE" ]]; then
-    echo "❌ Имя compose-файла не задано"
+if [[ -z "$COMPOSE" || "$COMPOSE" == */* || "$COMPOSE" == "." || "$COMPOSE" == ".." ]]; then
+    echo "❌ Некорректное имя compose-файла"
     exit 1
 fi
 
@@ -70,8 +75,11 @@ echo "Восстанавливаем из: $BACKUP_DIR"
 echo "Compose: $COMPOSE"
 echo "=================================================="
 
-read -p "Остановить контейнеры перед восстановлением? (Y/n): " stop_confirm
-if [[ ! "$stop_confirm" =~ ^[Nn]$ ]]; then
+read -rp "Остановить контейнеры и начать разрушительное восстановление? Введите RESTORE: " stop_confirm
+if [ "$stop_confirm" != "RESTORE" ]; then
+    echo "Восстановление отменено."
+    exit 0
+else
     echo "🛑 Останавливаем контейнеры..."
     if [[ -f "$COMPOSE" ]]; then
         "${DC[@]}" stop
@@ -88,13 +96,30 @@ echo "→ Восстанавливаем Bind Mounts:"
 for file in "$BACKUP_DIR"/bind_*.tar.gz; do
     if [ -f "$file" ]; then
         folder=$(basename "$file" .tar.gz | sed 's/^bind_//')
+        if [[ -z "$folder" || "$folder" == "." || "$folder" == ".." || "$folder" == */* ]]; then
+            echo "   [!] Некорректное имя bind mount; пропуск"
+            continue
+        fi
+        if [ -L "./$folder" ]; then
+            echo "   [!] Целевой путь является символьной ссылкой; пропуск"
+            continue
+        fi
         echo "   • ./$folder"
 
-        mkdir -p "./$folder"
-        rm -rf "./$folder"/* "./$folder"/.[!.]* 2>/dev/null || true
-
-        tar -xzf "$file" -C "./$folder" --strip-components=1 2>/dev/null && \
-        echo "     ✓ Восстановлено" || echo "     [!] Ошибка восстановления $folder"
+        if ! tar -tzf "$file" >/dev/null 2>&1 || tar -tzf "$file" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
+            echo "     [!] Небезопасный или повреждённый архив; пропуск"
+            continue
+        fi
+        restore_tmp=$(mktemp -d)
+        if tar -xzf "$file" -C "$restore_tmp" --strip-components=1; then
+            mkdir -p "./$folder"
+            find "./$folder" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+            cp -a "$restore_tmp"/. "./$folder"/
+            echo "     ✓ Восстановлено"
+        else
+            echo "     [!] Ошибка восстановления $folder"
+        fi
+        rm -rf "$restore_tmp"
     fi
 done
 
@@ -110,8 +135,13 @@ for file in "$BACKUP_DIR"/volume_*_backup.tar.gz; do
         vol=${vol#volume_}          # убираем volume_
         vol=${vol%_backup}          # убираем _backup
 
+        if [[ ! "$vol" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || ! tar -tzf "$file" >/dev/null 2>&1 || tar -tzf "$file" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
+            echo "   [!] Некорректный volume или архив; пропуск: $vol"
+            continue
+        fi
+
         # Сначала ищем существующий volume с этим именем (с префиксом или без)
-        REAL_VOL=$(docker volume ls -q | grep -E "(^|_)${vol}$" | head -n 1)
+        REAL_VOL=$(docker volume ls -q | awk -v vol="$vol" -v suffix="_$vol" '$0 == vol || substr($0, length($0)-length(suffix)+1) == suffix { print; exit }')
 
         # Если не нашли — создаём с префиксом проекта
         if [[ -z "$REAL_VOL" ]]; then
@@ -127,7 +157,7 @@ for file in "$BACKUP_DIR"/volume_*_backup.tar.gz; do
         docker run --rm \
           -v "${REAL_VOL}:/data" \
           -v "$(pwd)/$BACKUP_DIR:/backup:ro" \
-          alpine sh -c "rm -rf /data/* /data/.[!.]* 2>/dev/null; tar xzvf /backup/$(basename "$file") -C /data" && \
+          alpine sh -c 'find /data -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + && tar xzf "/backup/$1" -C /data' sh "$(basename "$file")" && \
         echo "     ✓ Восстановлено" || echo "     [!] Ошибка восстановления $vol"
     fi
 done

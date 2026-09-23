@@ -1,4 +1,5 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -u
 
 PROJECT_NAME=$(basename "$(pwd)")
 DATE=$(date +%Y-%m-%d_%H-%M)
@@ -54,7 +55,16 @@ while IFS= read -r line; do
         BIND_COUNT=$((BIND_COUNT + 1))
         name=$(basename "$host_path")
         echo "   • $host_path → bind_${name}.tar.gz"
-        tar -czf "$BACKUP_DIR/bind_${name}.tar.gz" -C "$(dirname "$host_path")" "$name" || echo "     [!] Ошибка"
+        if [ -e "$BACKUP_DIR/bind_${name}.tar.gz" ]; then
+            echo "     [!] Совпадающее имя bind mount; пропуск во избежание перезаписи"
+            continue
+        fi
+        if tar -czf "$BACKUP_DIR/bind_${name}.tar.gz" --exclude='./backups' --exclude="$name/backups" -C "$(dirname "$host_path")" "$name"; then
+            :
+        else
+            rm -f "$BACKUP_DIR/bind_${name}.tar.gz"
+            echo "     [!] Ошибка"
+        fi
     fi
 done < <(grep -E '^\s+-\s' "$COMPOSE" 2>/dev/null | grep ':')
 echo "   Найдено bind mounts: $BIND_COUNT"
@@ -66,7 +76,11 @@ echo "→ Бэкапим Named Volumes:"
 VOLUME_COUNT=0
 for vol in $("${DC[@]}" config --volumes 2>/dev/null); do
     if [[ -n "$vol" ]]; then
-        REAL_VOL=$(docker volume ls -q | grep -E "(^|_)${vol}$" | head -n 1)
+        if [[ ! "$vol" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+            echo "     [!] Небезопасное имя volume; пропуск: $vol"
+            continue
+        fi
+        REAL_VOL=$(docker volume ls -q | awk -v vol="$vol" -v suffix="_$vol" '$0 == vol || substr($0, length($0)-length(suffix)+1) == suffix { print; exit }')
         if [[ -z "$REAL_VOL" ]]; then
             REAL_VOL="$vol"
         fi

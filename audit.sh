@@ -81,7 +81,10 @@ check_os() {
 check_dependencies() {
     echo -e "${CYAN}Checking required dependencies...${NC}"
 
-    local required_commands=("curl" "jq" "systemctl" "apt-get")
+    local required_commands=("systemctl" "apt-get")
+    if [ -n "${SESSION:-}" ]; then
+        required_commands+=("curl" "jq")
+    fi
     local missing_commands=()
 
     for cmd in "${required_commands[@]}"; do
@@ -135,7 +138,10 @@ send_to_api() {
         fi
 
         local response
-        response=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" -d "$data" "$API_ENDPOINT")
+        response=$(curl --connect-timeout 10 --max-time 30 -sS -w "\n%{http_code}" -X POST -H "Content-Type: application/json" -d "$data" "$API_ENDPOINT") || {
+            echo -e "${RED}Failed to contact audit API${NC}" >&2
+            return 1
+        }
 
         local http_code
         http_code=$(echo "$response" | tail -n1)
@@ -275,7 +281,7 @@ check_ssh() {
     # Only continue if SSH is enabled
     if $ssh_enabled; then
         # Check if key-based auth is setup (look for authorized_keys)
-        if ! find "$HOME/.ssh" -type f -name "authorized_keys" 2>/dev/null | grep -q .; then
+        if ! find /root/.ssh /home -type f -name "authorized_keys" -size +0c 2>/dev/null | grep -q .; then
             send_status "$category" "fail" "No authorized_keys found in home directory" "key_auth"
             final_status="fail"
         else
@@ -287,7 +293,7 @@ check_ssh() {
             "PermitRootLogin no"
             "KbdInteractiveAuthentication no"
             "PasswordAuthentication no"
-            "UsePAM no"
+            "UsePAM yes"
         )
 
         for check in "${config_checks[@]}"; do
@@ -513,7 +519,6 @@ check_port_security() {
 
     for port in "${ordered_ports[@]}"; do
         local subcategory="port_${port}"
-        local port_description="Checking port ${port} (${insecure_ports[$port]})"
 
         if echo "$ports" | grep -q "^${port}$"; then
             failed=1
@@ -643,7 +648,11 @@ main() {
     check_unattended_upgrades || failed=1
 
 
-    send_status "audit" "pass" "Security audit complete"
+    if [ $failed -eq 1 ]; then
+        send_status "audit" "fail" "Security audit complete with failures"
+    else
+        send_status "audit" "pass" "Security audit complete"
+    fi
 
     if [ $failed -eq 1 ]; then
         echo -e "\n${RED}Audit completed with failures${NC}"

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -eu
+umask 077
+export LC_ALL=C
+
+CRL="/etc/openvpn/server/crl.pem"
+CA="/etc/openvpn/server/ca.crt"
+OPENSSL="/usr/bin/openssl"
+DATE="/usr/bin/date"
+SED="/usr/bin/sed"
+
+[[ -x "$OPENSSL" && -x "$DATE" && -x "$SED" ]] || exit 1
+[[ -s "$CRL" && -r "$CRL" && -s "$CA" && -r "$CA" ]] || exit 1
+
+"$OPENSSL" crl -in "$CRL" -noout -verify -CAfile "$CA" >/dev/null 2>&1 || exit 1
+
+next_update="$(
+  "$OPENSSL" crl -in "$CRL" -noout -nextupdate 2>/dev/null |
+  "$SED" -n 's/^nextUpdate=//p'
+)"
+last_update="$(
+  "$OPENSSL" crl -in "$CRL" -noout -lastupdate 2>/dev/null |
+  "$SED" -n 's/^lastUpdate=//p'
+)"
+[[ -n "$next_update" && -n "$last_update" ]] || exit 1
+
+next_epoch="$("$DATE" -u -d "$next_update" +%s 2>/dev/null)" || exit 1
+last_epoch="$("$DATE" -u -d "$last_update" +%s 2>/dev/null)" || exit 1
+now_epoch="$("$DATE" -u +%s)" || exit 1
+
+(( next_epoch > now_epoch && last_epoch <= now_epoch + 300 )) || exit 1
+exit 0

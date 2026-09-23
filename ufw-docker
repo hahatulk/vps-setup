@@ -22,13 +22,15 @@ ufw_docker_service_file="/etc/systemd/system/ufw-docker.service"
 
 # UFW-DOCKER GLOBAL VARIABLES END #
 
-if [[ "${ufw_docker_agent_image}" = *-@(legacy|nf_tables) ]]; then
+case "${ufw_docker_agent_image}" in
+*-legacy|*-nf_tables)
     if iptables --version | grep -F '(legacy)' &>/dev/null; then
         ufw_docker_agent_image="${ufw_docker_agent_image%-*}-legacy"
     else
         ufw_docker_agent_image="${ufw_docker_agent_image%-*}-nf_tables"
     fi
-fi
+    ;;
+esac
 
 test -n "$ufw_docker_agent_image"
 

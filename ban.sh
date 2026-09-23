@@ -52,6 +52,7 @@ ip_in_net() {
   fi
   valid_cidr "$target" || return 1
   net="${target%/*}"; mask="${target#*/}"
+  [ "$mask" -eq 0 ] && return 0
   ipi=$(ip2int "$ip"); neti=$(ip2int "$net")
   [ $(( ipi >> (32 - mask) )) -eq $(( neti >> (32 - mask) )) ]
 }
@@ -123,9 +124,9 @@ read_list_file() {
   if [[ "$src" =~ ^https?:// ]]; then
     tmp=$(mktemp)
     if command -v curl >/dev/null 2>&1; then
-      curl -fsSL "$src" -o "$tmp" || { echo -e "${RED}Не скачалось: $src${NC}"; rm -f "$tmp"; return 1; }
+      curl --connect-timeout 10 --max-time 60 -fsSL "$src" -o "$tmp" || { echo -e "${RED}Не скачалось: $src${NC}"; rm -f "$tmp"; return 1; }
     elif command -v wget >/dev/null 2>&1; then
-      wget -qO "$tmp" "$src" || { echo -e "${RED}Не скачалось: $src${NC}"; rm -f "$tmp"; return 1; }
+      wget --timeout=60 -qO "$tmp" "$src" || { echo -e "${RED}Не скачалось: $src${NC}"; rm -f "$tmp"; return 1; }
     else
       echo -e "${RED}Нужен curl или wget.${NC}"
       return 1
@@ -141,9 +142,10 @@ read_list_file() {
 }
 
 process_file() {
-  local action="$1" file line n=0 downloaded=0
-  file=$(read_list_file "$2") || return
-  [[ "$file" == /tmp/* ]] && downloaded=1
+  local action="$1" source="${2:-}" file line n=0 downloaded=0
+  [ -z "$source" ] && read -rp "Путь к файлу или URL: " source
+  [[ "$source" =~ ^https?:// ]] && downloaded=1
+  file=$(read_list_file "$source") || return
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%%#*}"
     line="${line//$'\r'/}"

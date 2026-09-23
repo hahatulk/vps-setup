@@ -1,0 +1,42 @@
+# Runtime PKI and exports must never be committed (including example paths).
+pki/
+easy-rsa/
+runtime/
+clients/
+openvpn-clients/
+*.key
+*.ovpn
+*.p12
+*.pfx
+*.pkcs12
+*.pem
+*.csr
+*.req
+*.crt
+index.txt*
+serial*
+crlnumber*
+
+# Deny every file in the example by default. Allow only documented placeholders.
+# Do NOT use !pki-example/**: that also unignores private keys and client profiles.
+/pki-example/**
+!/pki-example/README.md
+!/pki-example/pki/
+!/pki-example/pki/README.md
+!/pki-example/pki/vars.example
+!/pki-example/pki/private/
+!/pki-example/pki/private/.gitkeep
+!/pki-example/pki/issued/
+!/pki-example/pki/issued/.gitkeep
+!/pki-example/pki/reqs/
+!/pki-example/pki/reqs/.gitkeep
+!/pki-example/pki/certs_by_serial/
+!/pki-example/pki/certs_by_serial/.gitkeep
+!/pki-example/pki/tls-crypt-v2-clients/
+!/pki-example/pki/tls-crypt-v2-clients/.gitkeep
+!/pki-example/pki/secret-scrubbed/
+!/pki-example/pki/secret-scrubbed/.gitkeep
+!/pki-example/pki/revoked/
+!/pki-example/pki/revoked/.gitkeep
+!/pki-example/pki/inline/
+!/pki-example/pki/inline/.gitkeep

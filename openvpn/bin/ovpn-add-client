@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# shellcheck disable=SC1091
+source /usr/local/lib/pve-openvpn/common.sh
+
+require_root
+require_cmd openvpn
+require_cmd openssl
+load_config
+acquire_pki_lock
+
+name="${1:-}"
+[[ -n "$name" ]] || die "Использование: ovpn-add-client CLIENT_NAME"
+[[ $# -eq 1 ]] || die "Использование: ovpn-add-client CLIENT_NAME"
+validate_client_name "$name"
+
+EASYRSA="$EASYRSA_DIR/easyrsa"
+[[ -x "$EASYRSA" && ! -L "$EASYRSA" ]] || die "Не найден безопасный Easy-RSA executable: $EASYRSA"
+[[ -f "$SERVER_DIR/ca.crt" && ! -L "$SERVER_DIR/ca.crt" && -s "$SERVER_DIR/ca.crt" ]] ||
+  die "Не найден безопасный CA certificate."
+[[ -f "$SERVER_DIR/tls-crypt-v2-server.key" && ! -L "$SERVER_DIR/tls-crypt-v2-server.key" && -s "$SERVER_DIR/tls-crypt-v2-server.key" ]] ||
+  die "Не найден безопасный tls-crypt-v2 server key."
+
+issued="$EASYRSA_PKI_DIR/issued/$name.crt"
+key="$EASYRSA_PKI_DIR/private/$name.key"
+tls_dir="$EASYRSA_PKI_DIR/tls-crypt-v2-clients"
+tls_key="$tls_dir/$name.key"
+
+status="$(pki_client_status "$name" 2>/dev/null || true)"
+case "$status" in
+  R)
+    die "Имя '$name' уже было отозвано. Для новой идентичности используй новое имя клиента."
+    ;;
+  E)
+    die "Сертификат '$name' истёк. Создай клиента с новым именем или выполни контролируемое обновление PKI."
+    ;;
+  V)
+    [[ -s "$issued" ]] ||
+      die "PKI index считает '$name' активным, но certificate отсутствует."
+    if [[ ! -s "$key" ]]; then
+      if [[ -s "$EASYRSA_PKI_DIR/secret-scrubbed/$name" ]]; then
+        die "Private key '$name' ранее намеренно удалён ovpn-scrub-client-secret; переэкспорт невозможен. Отзови сертификат и создай новую идентичность."
+      fi
+      die "PKI index считает '$name' активным, но private key отсутствует. Не перезаписываю потенциально повреждённую PKI."
+    fi
+    warn "Клиент '$name' уже существует; будет переэкспортирован тот же cert/key."
+    ;;
+  "")
+    if [[ -e "$issued" || -e "$key" ]]; then
+      die "Обнаружены orphan cert/key для '$name' без корректной записи PKI index. Требуется ручная проверка."
+    fi
+
+    info "Создаю сертификат клиента '$name'..."
+    (
+      cd "$EASYRSA_DIR"
+      # Client private key остаётся без пароля для unattended OpenVPN.
+      # Если CA зашифрован, Easy-RSA/OpenSSL запросит пароль CA при подписании.
+      EASYRSA_BATCH=1 ./easyrsa build-client-full "$name" nopass
+    )
+    ;;
+  *)
+    die "Неизвестный статус PKI '$status' для клиента '$name'."
+    ;;
+esac
+
+[[ -f "$issued" && ! -L "$issued" && -s "$issued" ]] ||
+  die "После операции отсутствует безопасный certificate клиента."
+[[ -f "$key" && ! -L "$key" && -s "$key" ]] ||
+  die "После операции отсутствует безопасный private key клиента."
+openssl x509 -in "$issued" -noout -checkend 0 >/dev/null 2>&1 ||
+  die "Сертификат клиента уже недействителен/истёк."
+
+mkdir -p -- "$tls_dir" "$OVPN_CLIENT_DIR"
+[[ -d "$tls_dir" && ! -L "$tls_dir" ]] || die "Небезопасный каталог transport keys: $tls_dir"
+[[ -d "$OVPN_CLIENT_DIR" && ! -L "$OVPN_CLIENT_DIR" ]] || die "Небезопасный каталог profiles: $OVPN_CLIENT_DIR"
+chmod 0700 "$tls_dir" "$OVPN_CLIENT_DIR"
+
+tmp_tls=""
+tmp_profile=""
+cleanup() {
+  [[ -z "$tmp_tls" ]] || rm -f -- "$tmp_tls"
+  [[ -z "$tmp_profile" ]] || rm -f -- "$tmp_profile"
+}
+trap cleanup EXIT
+
+# Генерируем заново и атомарно заменяем transport key при каждом экспорте.
+# Это не оставляет в новом профиле повреждённый/stale key от старого server key.
+info "Создаю уникальный tls-crypt-v2 key клиента..."
+tmp_tls="$(mktemp "$tls_dir/.${name}.XXXXXX")"
+openvpn --tls-crypt-v2 "$SERVER_DIR/tls-crypt-v2-server.key" \
+  --genkey tls-crypt-v2-client "$tmp_tls"
+chmod 0600 "$tmp_tls"
+mv -f -- "$tmp_tls" "$tls_key"
+tmp_tls=""
+
+profile="$OVPN_CLIENT_DIR/$name.ovpn"
+tmp_profile="$(mktemp "$OVPN_CLIENT_DIR/.${name}.ovpn.XXXXXX")"
+
+{
+  cat <<EOF
+client
+dev tun
+proto $OVPN_PROTO
+remote $OVPN_ENDPOINT $OVPN_PORT
+resolv-retry infinite
+nobind
+persist-key
+persist-tun
+remote-cert-tls server
+verify-x509-name $OVPN_SERVER_NAME name
+auth-nocache
+tls-version-min 1.2
+tls-cert-profile preferred
+data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
+auth SHA256
+allow-compression no
+verb 3
+
+<ca>
+EOF
+  sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' "$SERVER_DIR/ca.crt"
+  cat <<'EOF'
+</ca>
+<cert>
+EOF
+  sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' "$issued"
+  cat <<'EOF'
+</cert>
+<key>
+EOF
+  cat "$key"
+  cat <<'EOF'
+</key>
+<tls-crypt-v2>
+EOF
+  cat "$tls_key"
+  cat <<'EOF'
+</tls-crypt-v2>
+EOF
+} > "$tmp_profile"
+
+chmod 0600 "$tmp_profile"
+mv -f -- "$tmp_profile" "$profile"
+tmp_profile=""
+trap - EXIT
+
+info "Готов профиль: $profile"
+echo
+echo "ВАЖНО: профиль содержит приватный ключ. Передавай его только по защищённому каналу."
+echo "После безопасной передачи можешь удалить серверную копию .ovpn; сертификат продолжит работать."

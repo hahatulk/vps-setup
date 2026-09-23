@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# shellcheck disable=SC1091
+source /usr/local/lib/pve-openvpn/common.sh
+
+require_root
+require_cmd systemctl
+require_cmd openssl
+load_config
+acquire_pki_lock
+
+crl_revokes_client() {
+  local crl_file="$1" client_name="$2" serial
+  serial="$(awk -F '\t' -v target="$client_name" '
+    function normalized(value) {
+      value=toupper(value)
+      sub(/^0+/, "", value)
+      return value == "" ? "0" : value
+    }
+    {
+      cn=$6
+      sub(/^.*CN=/, "", cn)
+      sub(/\/.*/, "", cn)
+      if (cn == target && $1 == "R") found=normalized($4)
+    }
+    END { if (found != "") print found; else exit 1 }
+  ' "$EASYRSA_PKI_DIR/index.txt")" || return 1
+
+  openssl crl -in "$crl_file" -noout -text 2>/dev/null |
+    awk -v target="$serial" '
+      /Serial Number:/ {
+        value=toupper($3)
+        gsub(/:/, "", value)
+        sub(/^0+/, "", value)
+        if (value == "") value="0"
+        if (value == target) found=1
+      }
+      END { exit(found ? 0 : 1) }
+    '
+}
+
+stop_openvpn_fail_closed() {
+  local reason="$1" unit="openvpn-server@${OVPN_SERVER_NAME}.service"
+  warn "$reason"
+  if ! systemctl stop "$unit"; then
+    warn "Не удалось выполнить systemctl stop $unit."
+  fi
+  if systemctl is-active --quiet "$unit"; then
+    die "CRITICAL: $unit всё ещё активен; заблокируй VPN-порт вручную."
+  fi
+  die "OpenVPN остановлен fail-closed."
+}
+
+disconnect_all=0
+name=""
+
+for arg in "$@"; do
+  case "$arg" in
+    --disconnect-all) disconnect_all=1 ;;
+    -h|--help)
+      echo "Использование: ovpn-revoke-client CLIENT_NAME [--disconnect-all]"
+      exit 0
+      ;;
+    -*)
+      die "Неизвестный параметр: $arg"
+      ;;
+    *)
+      [[ -z "$name" ]] || die "Укажи только одно имя клиента."
+      name="$arg"
+      ;;
+  esac
+done
+
+[[ -n "$name" ]] || die "Использование: ovpn-revoke-client CLIENT_NAME [--disconnect-all]"
+validate_client_name "$name"
+
+status="$(pki_client_status "$name" 2>/dev/null || true)"
+if [[ "$status" == "R" ]]; then
+  rm -f -- \
+    "$OVPN_CLIENT_DIR/$name.ovpn" \
+    "$EASYRSA_PKI_DIR/tls-crypt-v2-clients/$name.key"
+  crl_is_healthy "$SERVER_DIR/crl.pem" "$SERVER_DIR/ca.crt" ||
+    stop_openvpn_fail_closed "Клиент уже revoked, но установленный CRL отсутствует, повреждён или истёк."
+  crl_revokes_client "$SERVER_DIR/crl.pem" "$name" ||
+    stop_openvpn_fail_closed "Установленный CRL не содержит отзыв сертификата '$name'."
+  info "Клиент '$name' уже отозван. CRL исправен; локальный профиль/transport key удалены."
+  exit 0
+fi
+
+[[ "$status" == "V" || "$status" == "E" ]] ||
+  die "Клиент '$name' не найден в PKI."
+
+info "Отзываю сертификат '$name'..."
+
+if ! (
+  cd "$EASYRSA_DIR"
+
+  if [[ "$status" == "E" ]] && ./easyrsa help revoke-expired >/dev/null 2>&1; then
+    EASYRSA_BATCH=1 ./easyrsa revoke-expired "$name" keyCompromise
+  elif ./easyrsa help revoke-issued >/dev/null 2>&1; then
+    EASYRSA_BATCH=1 ./easyrsa revoke-issued "$name" keyCompromise
+  else
+    EASYRSA_BATCH=1 ./easyrsa revoke "$name" keyCompromise
+  fi
+
+  EASYRSA_CRL_DAYS="$OVPN_CRL_DAYS" EASYRSA_BATCH=1 ./easyrsa gen-crl
+); then
+  new_status="$(pki_client_status "$name" 2>/dev/null || true)"
+
+  if [[ "$new_status" == "R" ]]; then
+    stop_openvpn_fail_closed "Certificate уже revoked, но новый CRL создать не удалось."
+  fi
+
+  die "Отзыв сертификата не завершён; PKI status не изменился на revoked."
+fi
+
+if ! crl_is_healthy "$EASYRSA_PKI_DIR/crl.pem" "$SERVER_DIR/ca.crt"; then
+  stop_openvpn_fail_closed "После revoke CRL отсутствует, повреждён или истёк."
+fi
+
+tmp_crl="$(mktemp "$SERVER_DIR/.crl.pem.XXXXXX")"
+cleanup() {
+  rm -f -- "$tmp_crl"
+}
+trap cleanup EXIT
+
+if ! install -m 0644 "$EASYRSA_PKI_DIR/crl.pem" "$tmp_crl"; then
+  stop_openvpn_fail_closed "Не удалось подготовить новый CRL."
+fi
+
+if ! mv -f -- "$tmp_crl" "$SERVER_DIR/crl.pem"; then
+  stop_openvpn_fail_closed "Не удалось атомарно установить новый CRL."
+fi
+
+trap - EXIT
+
+if ! crl_is_healthy "$SERVER_DIR/crl.pem" "$SERVER_DIR/ca.crt"; then
+  stop_openvpn_fail_closed "Установленный CRL не прошёл проверку."
+fi
+if ! crl_revokes_client "$SERVER_DIR/crl.pem" "$name"; then
+  stop_openvpn_fail_closed "Установленный CRL не содержит отзыв сертификата '$name'."
+fi
+
+rm -f -- \
+  "$OVPN_CLIENT_DIR/$name.ovpn" \
+  "$EASYRSA_PKI_DIR/tls-crypt-v2-clients/$name.key"
+
+info "Сертификат отозван, CRL проверен и установлен, локальный профиль удалён."
+
+if (( disconnect_all )); then
+  warn "Перезапускаю OpenVPN: все текущие VPN-сессии переподключатся."
+  systemctl restart "openvpn-server@${OVPN_SERVER_NAME}.service"
+else
+  echo "Новые TLS-сессии этого сертификата будут отклонены."
+  echo "Уже установленная сессия может жить до renegotiation."
+  echo "Для немедленного сброса всех VPN-сессий:"
+  echo "  ovpn-revoke-client $name --disconnect-all"
+fi

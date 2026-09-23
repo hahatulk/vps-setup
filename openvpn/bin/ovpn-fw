@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# shellcheck disable=SC1091
+source /usr/local/lib/pve-openvpn/common.sh
+
+require_root
+require_cmd iptables
+require_cmd flock
+
+if [[ -e /run/pve-openvpn || -L /run/pve-openvpn ]]; then
+  [[ -d /run/pve-openvpn && ! -L /run/pve-openvpn ]] ||
+    die "Небезопасный runtime directory: /run/pve-openvpn"
+fi
+install -d -o root -g root -m 0700 /run/pve-openvpn
+exec 8>/run/pve-openvpn/firewall.lock
+flock -x 8
+
+action="${1:-}"
+[[ "$action" == "up" || "$action" == "down" ]] || die "Использование: ovpn-fw up|down"
+
+GUARD_CHAIN="PVE-OVPN-GUARD"
+ALLOW_CHAIN="PVE-OVPN-ALLOW"
+NAT_CHAIN="PVE-OVPN-NAT"
+COMMENT="pve-openvpn-kit"
+STAGING_COMMENT="pve-openvpn-kit-staging"
+
+chain_exists() {
+  local table="$1" chain="$2"
+  if [[ "$table" == "filter" ]]; then
+    iptables_cmd -S "$chain" >/dev/null 2>&1
+  else
+    iptables_cmd -t "$table" -S "$chain" >/dev/null 2>&1
+  fi
+}
+
+delete_hook() {
+  local table="$1" parent="$2" child="$3"
+  if [[ "$table" == "filter" ]]; then
+    while iptables_cmd -C "$parent" -m comment --comment "$COMMENT" -j "$child" 2>/dev/null; do
+      iptables_cmd -D "$parent" -m comment --comment "$COMMENT" -j "$child" || return 1
+    done
+  else
+    while iptables_cmd -t "$table" -C "$parent" -m comment --comment "$COMMENT" -j "$child" 2>/dev/null; do
+      iptables_cmd -t "$table" -D "$parent" -m comment --comment "$COMMENT" -j "$child" || return 1
+    done
+  fi
+}
+
+delete_staging_hooks() {
+  while iptables_cmd -C FORWARD -m comment --comment "$STAGING_COMMENT" \
+    -s "$OVPN_VPN_CIDR" -j DROP 2>/dev/null; do
+    iptables_cmd -D FORWARD -m comment --comment "$STAGING_COMMENT" \
+      -s "$OVPN_VPN_CIDR" -j DROP || return 1
+  done
+  while iptables_cmd -C FORWARD -m comment --comment "$STAGING_COMMENT" \
+    -i "$OVPN_TUN_IF" -j DROP 2>/dev/null; do
+    iptables_cmd -D FORWARD -m comment --comment "$STAGING_COMMENT" \
+      -i "$OVPN_TUN_IF" -j DROP || return 1
+  done
+}
+
+cleanup() {
+  delete_hook filter FORWARD "$GUARD_CHAIN"
+  delete_hook filter FORWARD "$ALLOW_CHAIN"
+  delete_hook nat POSTROUTING "$NAT_CHAIN"
+
+  for chain in "$GUARD_CHAIN" "$ALLOW_CHAIN"; do
+    if chain_exists filter "$chain"; then
+      iptables_cmd -F "$chain"
+      iptables_cmd -X "$chain"
+    fi
+  done
+
+  if chain_exists nat "$NAT_CHAIN"; then
+    iptables_cmd -t nat -F "$NAT_CHAIN"
+    iptables_cmd -t nat -X "$NAT_CHAIN"
+  fi
+}
+
+load_config
+
+if [[ "$action" == "down" ]]; then
+  delete_staging_hooks
+  cleanup
+  info "OpenVPN firewall/NAT rules удалены."
+  exit 0
+fi
+
+firewall_failed() {
+  local rc=$?
+  trap - ERR
+  set +e
+  warn "Применение firewall завершилось ошибкой; устанавливаю аварийный DROP для VPN source."
+  if ! chain_exists filter "$GUARD_CHAIN"; then
+    iptables_cmd -N "$GUARD_CHAIN"
+  fi
+  iptables_cmd -F "$GUARD_CHAIN"
+  iptables_cmd -A "$GUARD_CHAIN" -s "$OVPN_VPN_CIDR" -j DROP
+  iptables_cmd -A "$GUARD_CHAIN" -i "$OVPN_TUN_IF" -j DROP
+  delete_hook filter FORWARD "$GUARD_CHAIN"
+  iptables_cmd -I FORWARD 1 -m comment --comment "$COMMENT" -j "$GUARD_CHAIN"
+  exit "$rc"
+}
+trap firewall_failed ERR
+
+# Временные top-level DROP закрывают окно между удалением старых chains и
+# подключением полностью собранного нового guard. При ошибке они остаются.
+iptables_cmd -I FORWARD 1 -m comment --comment "$STAGING_COMMENT" \
+  -i "$OVPN_TUN_IF" -j DROP
+iptables_cmd -I FORWARD 1 -m comment --comment "$STAGING_COMMENT" \
+  -s "$OVPN_VPN_CIDR" -j DROP
+
+# Полностью пересобираем только собственные chains. ERR trap оставляет
+# аварийный DROP, если любой шаг после cleanup завершится ошибкой.
+cleanup
+
+iptables_cmd -N "$GUARD_CHAIN"
+iptables_cmd -N "$ALLOW_CHAIN"
+iptables_cmd -t nat -N "$NAT_CHAIN"
+
+# Сначала наполняем ещё не подключённый guard запретом. Затем подключаем его:
+# VPN source ни на одном последующем шаге не остаётся без fail-closed правила.
+iptables_cmd -A "$GUARD_CHAIN" -s "$OVPN_VPN_CIDR" -j DROP
+iptables_cmd -A "$GUARD_CHAIN" -i "$OVPN_TUN_IF" -j DROP
+iptables_cmd -I FORWARD 1 -m comment --comment "$COMMENT" -j "$GUARD_CHAIN"
+
+# Allow идёт в конец. Он помогает системам с policy DROP, но не обходится
+# через более ранний явный DROP/PVE firewall rule.
+iptables_cmd -A FORWARD -m comment --comment "$COMMENT" -j "$ALLOW_CHAIN"
+
+iptables_cmd -t nat -A POSTROUTING -m comment --comment "$COMMENT" -j "$NAT_CHAIN"
+
+local_lan=""
+for local_lan in "${OVPN_LANS[@]}"; do
+  # Разрешённый VPN ingress продолжает обычную firewall policy.
+  iptables_cmd -I "$GUARD_CHAIN" 1 \
+    -i "$OVPN_TUN_IF" -s "$OVPN_VPN_CIDR" -d "$local_lan" -j RETURN
+
+  # Если обычная firewall policy не приняла решение раньше, разрешаем
+  # только явно указанный маршрут и established return.
+  iptables_cmd -A "$ALLOW_CHAIN"     -i "$OVPN_TUN_IF" -s "$OVPN_VPN_CIDR" -d "$local_lan" -j ACCEPT
+
+  iptables_cmd -A "$ALLOW_CHAIN"     -o "$OVPN_TUN_IF" -s "$local_lan" -d "$OVPN_VPN_CIDR"     -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+  iptables_cmd -t nat -A "$NAT_CHAIN"     -s "$OVPN_VPN_CIDR" -d "$local_lan" -j MASQUERADE
+done
+
+if [[ "$OVPN_MODE" == "full" ]]; then
+  iptables_cmd -I "$GUARD_CHAIN" 1 \
+    -i "$OVPN_TUN_IF" -s "$OVPN_VPN_CIDR" -o "$OVPN_WAN_IF" -j RETURN
+
+  iptables_cmd -A "$ALLOW_CHAIN"     -i "$OVPN_TUN_IF" -s "$OVPN_VPN_CIDR" -o "$OVPN_WAN_IF" -j ACCEPT
+
+  iptables_cmd -A "$ALLOW_CHAIN"     -i "$OVPN_WAN_IF" -o "$OVPN_TUN_IF" -d "$OVPN_VPN_CIDR"     -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+  iptables_cmd -t nat -A "$NAT_CHAIN"     -s "$OVPN_VPN_CIDR" -o "$OVPN_WAN_IF" -j MASQUERADE
+fi
+
+# DROP блокируют как spoofed VPN source с других интерфейсов, так и пакеты
+# из tun с адресом вне выданного VPN pool.
+delete_staging_hooks
+trap - ERR
+info "OpenVPN firewall guard/allow/NAT rules установлены."

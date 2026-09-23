@@ -96,7 +96,8 @@ if [[ "$allow_sudo" == "y" || "$allow_sudo" == "Y" ]]; then
     echo "Sudo with password enabled."
   fi
 else
-  echo "Sudo setup skipped."
+  rm -f "/etc/sudoers.d/90-$username"
+  echo "Sudo setup skipped; any managed passwordless-sudo rule was removed."
 fi
 
 # === Docker (optional; Docker is not assumed to exist on a Proxmox host) ===
