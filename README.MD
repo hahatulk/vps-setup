@@ -68,5 +68,5 @@ nano /etc/docker/daemon.json
 }
 ```
 ```bash
-sudo systemctl restart docker
+systemctl restart docker
 ```

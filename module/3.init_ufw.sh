@@ -5,37 +5,37 @@
 
 echo "Starting UFW setup..."
 
-sudo apt-get install -y ufw
+apt-get install -y ufw
 
 # Allow ports interactively
 read -p "Enter SSH port to allow (default 2001): " ssh_port
 ssh_port=${ssh_port:-2001}
-sudo ufw allow "$ssh_port"
+ufw allow "$ssh_port"
 
-sudo ufw allow ssh  # In case default SSH is needed
-sudo ufw allow https
-sudo ufw allow ftp
+ufw allow ssh  # In case default SSH is needed
+ufw allow https
+ufw allow ftp
 
-sudo ufw default deny incoming
-sudo ufw default allow outgoing
+ufw default deny incoming
+ufw default allow outgoing
 
-sudo cp ./ufw-docker /usr/local/bin/ufw-docker
-sudo chmod +x /usr/local/bin/ufw-docker
-sudo ufw-docker install
+cp ./ufw-docker /usr/local/bin/ufw-docker
+chmod +x /usr/local/bin/ufw-docker
+ufw-docker install
 
-sudo ufw enable
+ufw enable
 
-sudo ufw status verbose
+ufw status verbose
 
-sudo systemctl restart ufw
+systemctl restart ufw
 
-sudo apt install fail2ban -y
+apt install fail2ban -y
 
-sudo cp ./fail2ban/jail.local /etc/fail2ban/jail.local
+cp ./fail2ban/jail.local /etc/fail2ban/jail.local
 
-sudo systemctl start fail2ban
-sudo systemctl enable fail2ban
-sudo systemctl status fail2ban
+systemctl start fail2ban
+systemctl enable fail2ban
+systemctl status fail2ban
 
 echo "UFW setup completed."
-echo "To delete a rule: sudo ufw status numbered; sudo ufw delete <number>"
+echo "To delete a rule: ufw status numbered; ufw delete <number>"

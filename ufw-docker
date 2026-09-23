@@ -629,9 +629,9 @@ function ufw-docker--install() {
     if "$changed"; then
         err "\\nPlease restart UFW service manually by using the following command:"
         if type systemctl &>/dev/null; then
-            err "    sudo systemctl restart ufw"
+            err "    systemctl restart ufw"
         else
-            err "    sudo service ufw restart"
+            err "    service ufw restart"
         fi
     fi
 }
@@ -714,9 +714,9 @@ function ufw-docker--uninstall() {
     if "$changed"; then
         err "\\nPlease restart UFW service manually by using the following command:"
         if type systemctl &>/dev/null; then
-            err "    sudo systemctl restart ufw"
+            err "    systemctl restart ufw"
         else
-            err "    sudo service ufw restart"
+            err "    service ufw restart"
         fi
     fi
 }
@@ -775,7 +775,7 @@ function ufw-docker--help() {
 	  ufw-docker install --system             # Install firewall rules and man-page
 	  ufw-docker install --docker-subnets     # Auto-detect and use all Docker network subnets
 	  ufw-docker install --docker-subnets 192.168.207.0/24 10.207.0.0/16 fd00:cf::/64
-	  ufw-docker install --docker-subnets 192.168.207.0/24 10.207.0.0/16 fd00:cf::/64 
+	  ufw-docker install --docker-subnets 192.168.207.0/24 10.207.0.0/16 fd00:cf::/64
 
 	  ufw-docker install-service              # Install the ufw-docker service
 	  ufw-docker install-service --force      # Install the ufw-docker service, overwriting the existing service file
@@ -960,12 +960,12 @@ function man-page() {
 
 	.nf
 	# download the script
-	sudo wget -O /usr/local/bin/ufw-docker \\
+	wget -O /usr/local/bin/ufw-docker \\
 		https://github.com/chaifeng/ufw-docker/raw/master/ufw-docker
-	sudo chmod +x /usr/local/bin/ufw-docker
+	chmod +x /usr/local/bin/ufw-docker
 
 	# integrate with UFW (adds iptables rules) and installs the man page
-	sudo ufw-docker install --system
+	ufw-docker install --system
 	.fi
 
 	.B UNINSTALL

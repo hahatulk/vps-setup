@@ -80,7 +80,7 @@ check_os() {
 
 check_dependencies() {
     echo -e "${CYAN}Checking required dependencies...${NC}"
-    
+
     local required_commands=("curl" "jq" "systemctl" "apt-get")
     local missing_commands=()
 
@@ -111,7 +111,7 @@ send_to_api() {
         local status="$2"
         local message="$3"
         local check="${4:-}"
-        
+
         local data
         if [ -n "$check" ]; then
             data=$(jq -n \
@@ -139,7 +139,7 @@ send_to_api() {
 
         local http_code
         http_code=$(echo "$response" | tail -n1)
-        
+
         if [ "$http_code" != "200" ]; then
             echo "$response" | sed '$d'
             echo -e "${RED}Failed to send status to API (HTTP $http_code)${NC}"
@@ -154,10 +154,10 @@ print_status() {
     local status="$2"
     local message="$3"
     local check="${4:-}"
-    
+
     local indent=""
     local status_color=""
-    
+
     if [ -n "$check" ]; then
         indent="  ├─ "
         category="$check"  # Use check as the category for checks
@@ -200,7 +200,7 @@ send_status() {
 check_ufw() {
     local category="ufw_security"
     local failed=false
-    
+
     send_status "$category" "running" "Starting UFW security check"
 
     # Check if UFW is installed
@@ -210,10 +210,10 @@ check_ufw() {
     else
         send_status "$category" "pass" "UFW is installed" "installation"
     fi
-    
+
     # Check if UFW is active
     if ! $failed; then
-        if ! sudo ufw status | grep -qw "active"; then
+        if ! ufw status | grep -qw "active"; then
             send_status "$category" "fail" "UFW is not active" "active_status"
             failed=true
         else
@@ -222,11 +222,11 @@ check_ufw() {
     else
         send_status "$category" "skip" "UFW not installed - skipping" "active_status"
     fi
-    
+
     # Check default policies
     if ! $failed; then
         local default_incoming
-        if ! default_incoming=$(sudo ufw status verbose | grep "Default:" | grep "incoming" | awk '{print $2}'); then
+        if ! default_incoming=$(ufw status verbose | grep "Default:" | grep "incoming" | awk '{print $2}'); then
             send_status "$category" "error" "Failed to retrieve UFW default policy" "default_policy"
             failed=true
         elif [ "$default_incoming" != "deny" ]; then
@@ -238,7 +238,7 @@ check_ufw() {
     else
         send_status "$category" "skip" "UFW not active - skipping" "default_policy"
     fi
-    
+
     # Final status
     if $failed; then
         send_status "$category" "fail" "Some UFW security checks failed"
@@ -253,7 +253,7 @@ check_ssh() {
     local category="ssh_security"
     local final_status="pass"
     local ssh_enabled=false
-    
+
     send_status "$category" "running" "Starting SSH security check"
 
     # Check if SSH is enabled
@@ -271,7 +271,7 @@ check_ssh() {
         send_status "$category" "pass" "All SSH security checks passed"
         return 0
     fi
-    
+
     # Only continue if SSH is enabled
     if $ssh_enabled; then
         # Check if key-based auth is setup (look for authorized_keys)
@@ -281,7 +281,7 @@ check_ssh() {
         else
             send_status "$category" "pass" "Key-based authentication is set up" "key_auth"
         fi
-        
+
         # Check SSH config settings
         local config_checks=(
             "PermitRootLogin no"
@@ -289,15 +289,15 @@ check_ssh() {
             "PasswordAuthentication no"
             "UsePAM no"
         )
-        
+
         for check in "${config_checks[@]}"; do
             local key="${check% *}" # Get the key part (before the space)
             local expected="${check#* }" # Get the value part (after the space)
             local actual
-            
+
             # Get actual value from sshd -T output
-            actual=$(sudo sshd -T | grep -i "^${key}" | awk '{print $2}')
-            
+            actual=$(sshd -T | grep -i "^${key}" | awk '{print $2}')
+
             if [ -z "$actual" ]; then
                 send_status "$category" "fail" "${key} is not configured" "config_${key}"
                 final_status="fail"
@@ -309,7 +309,7 @@ check_ssh() {
             fi
         done
     fi
-    
+
     # Final status
     if [ "$final_status" = "fail" ]; then
         send_status "$category" "fail" "Some SSH security checks failed"
@@ -326,24 +326,24 @@ check_non_root_user() {
     local sudo_users
     local admin_users
     local privileged_users
-    
+
     send_status "$category" "running" "Checking for properly configured non-root user"
 
     # Look for users with sudo privileges (in sudo or admin group)
     sudo_users=$(grep -Po '^sudo:.*:\K.*$' /etc/group | tr ',' '\n' | grep -v root)
     admin_users=$(grep -Po '^admin:.*:\K.*$' /etc/group | tr ',' '\n' | grep -v root)
-    
+
     if [ -z "$sudo_users" ] && [ -z "$admin_users" ]; then
         send_status "$category" "fail" "No non-root users found with sudo privileges" "sudo_access"
         final_status="fail"
     else
         # Combine and deduplicate users
         privileged_users=$(echo -e "${sudo_users}\n${admin_users}" | sort -u | grep -v '^$')
-        
+
         # Check if any of these users have a valid shell
         local valid_user_found=false
         local user_shell
-        
+
         while IFS= read -r user; do
             user_shell=$(getent passwd "$user" | cut -d: -f7)
             if [[ "$user_shell" != "/usr/sbin/nologin" && "$user_shell" != "/bin/false" ]]; then
@@ -352,13 +352,13 @@ check_non_root_user() {
                 break
             fi
         done <<< "$privileged_users"
-        
+
         if ! $valid_user_found; then
             send_status "$category" "fail" "No non-root sudo users found" "sudo_access"
             final_status="fail"
         fi
     fi
-    
+
     # Final status
     if [ "$final_status" = "fail" ]; then
         send_status "$category" "fail" "Non-root sudo user check failed"
@@ -419,7 +419,7 @@ check_unattended_upgrades() {
    local auto_upgrades_file="/etc/apt/apt.conf.d/20auto-upgrades"
    local update_enabled
    local upgrade_enabled
-   
+
    send_status "$category" "running" "Checking automatic upgrades configuration"
 
    # Check if package is installed
@@ -449,7 +449,7 @@ check_unattended_upgrades() {
 
        update_enabled=$(grep "APT::Periodic::Update-Package-Lists" "$auto_upgrades_file" | grep -o '[0-9]\+' || echo "0")
        upgrade_enabled=$(grep "APT::Periodic::Unattended-Upgrade" "$auto_upgrades_file" | grep -o '[0-9]\+' || echo "0")
-       
+
        if [ "$update_enabled" = "0" ]; then
            send_status "$category" "fail" "Automatic package list updates are disabled" "auto_update"
            final_status="fail"
@@ -508,13 +508,13 @@ check_port_security() {
         [3389]="RDP - Remote Desktop"
     )
     local -a ordered_ports=(21 23 25 69 111 135 445 3389)
-    
+
     local failed=0
 
     for port in "${ordered_ports[@]}"; do
         local subcategory="port_${port}"
         local port_description="Checking port ${port} (${insecure_ports[$port]})"
-                
+
         if echo "$ports" | grep -q "^${port}$"; then
             failed=1
             send_status "$category" "fail" "Port ${port} (${insecure_ports[$port]}) is open" "$subcategory"
@@ -539,7 +539,7 @@ check_fail2ban() {
     local config_file_missing=false
     local ssh_enabled
     local ssh_mode
-    
+
     send_status "$category" "running" "Checking fail2ban installation and configuration"
 
     # Check if package is installed - all other checks depend on this
@@ -608,7 +608,7 @@ check_fail2ban() {
         send_status "$category" "skip" "fail2ban not installed - skipping" "ssh_jail_enabled"
         send_status "$category" "skip" "fail2ban not installed - skipping" "ssh_jail_mode"
     fi
-    
+
     # Final status
     if $failed; then
         send_status "$category" "fail" "Some fail2ban security checks failed"
@@ -633,7 +633,7 @@ main() {
     send_status "audit" "running" "Starting security audit v${VERSION}"
 
     local failed=0
-    
+
     check_non_root_user || failed=1
     check_ufw || failed=1
     check_ssh || failed=1
