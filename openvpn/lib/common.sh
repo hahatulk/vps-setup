@@ -237,7 +237,7 @@ load_config() {
   validate_endpoint "$OVPN_ENDPOINT"
   [[ "$OVPN_PORT" =~ ^[0-9]{1,5}$ ]] || die "Некорректный OVPN_PORT в $CONFIG_FILE."
   (( 10#$OVPN_PORT >= 1 && 10#$OVPN_PORT <= 65535 )) || die "OVPN_PORT вне диапазона."
-  [[ "$OVPN_PROTO" == "udp" ]] || die "Поддерживается только OVPN_PROTO=udp."
+  [[ "$OVPN_PROTO" == "udp" || "$OVPN_PROTO" == "tcp" ]] || die "OVPN_PROTO должен быть udp или tcp."
   [[ "$OVPN_MODE" == "split" || "$OVPN_MODE" == "full" ]] || die "Некорректный OVPN_MODE."
   [[ "$OVPN_WAN_IF" =~ ^[A-Za-z0-9_.:-]{1,15}$ ]] || die "Некорректный OVPN_WAN_IF."
   [[ "$OVPN_TUN_IF" =~ ^[A-Za-z0-9_.:-]{1,15}$ ]] || die "Некорректный OVPN_TUN_IF."
@@ -265,6 +265,22 @@ load_config() {
   for dns in "${OVPN_DNS[@]}"; do
     validate_ipv4 "$dns"
   done
+}
+
+openvpn_server_proto() {
+  case "${1:-}" in
+    udp) printf '%s\n' "udp" ;;
+    tcp) printf '%s\n' "tcp-server" ;;
+    *) return 1 ;;
+  esac
+}
+
+openvpn_client_proto() {
+  case "${1:-}" in
+    udp) printf '%s\n' "udp" ;;
+    tcp) printf '%s\n' "tcp-client" ;;
+    *) return 1 ;;
+  esac
 }
 
 validate_client_name() {

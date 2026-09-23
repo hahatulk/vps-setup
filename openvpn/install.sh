@@ -7,6 +7,7 @@ source "$SCRIPT_DIR/lib/common.sh"
 
 ENDPOINT=""
 PORT="1194"
+PROTO="udp"
 VPN_CIDR="10.8.0.0/24"
 WAN_IF=""
 MODE="split"
@@ -37,12 +38,13 @@ usage() {
 Обычная интерактивная установка:
   ./install.sh
 
-Скрипт сам спросит endpoint, порт, WAN, VPN subnet, LAN-сети,
+Скрипт сам спросит endpoint, транспорт UDP/TCP, порт, WAN, VPN subnet, LAN-сети,
 split/full режим, DNS, совместимость tls-crypt-v2 и защиту CA.
 
 Опции ниже сохранены только для осознанной автоматизации/CI:
   --endpoint HOST_OR_IP     Публичный IPv4 или DNS-имя VPN-сервера.
-  --port PORT               UDP-порт (по умолчанию 1194).
+  --proto udp|tcp           Транспорт OpenVPN (по умолчанию udp).
+  --port PORT               TCP/UDP-порт (по умолчанию 1194).
   --wan IFACE               WAN/bridge, например vmbr0. Иначе определяется по default route.
   --vpn-cidr CIDR           VPN IPv4 subnet (по умолчанию 10.8.0.0/24).
   --lan CIDR                Разрешённая через VPN LAN/VM сеть. Можно повторять.
@@ -73,6 +75,10 @@ while (($#)); do
     --endpoint)
       [[ $# -ge 2 ]] || die "Для --endpoint нужно значение."
       ENDPOINT="$2"; shift 2
+      ;;
+    --proto)
+      [[ $# -ge 2 ]] || die "Для --proto нужно значение."
+      PROTO="${2,,}"; shift 2
       ;;
     --port)
       [[ $# -ge 2 ]] || die "Для --port нужно значение."
@@ -129,7 +135,22 @@ if (( INTERACTIVE_INSTALL )); then
   echo
 
   ENDPOINT="$(prompt_nonempty "Публичный IPv4 или DNS-имя VPN (например vpn.example.com): ")"
-  PORT="$(prompt_with_default "UDP-порт OpenVPN" "$PORT")"
+
+  echo
+  echo "Транспорт OpenVPN:"
+  echo "  1) UDP — рекомендуется: быстрее и без TCP-over-TCP проблем"
+  echo "  2) TCP — используй, если UDP блокируется сетью/провайдером"
+  while true; do
+    IFS= read -r -p "Выбор [1]: " proto_choice || die "Ввод прерван."
+    proto_choice="${proto_choice:-1}"
+    case "$proto_choice" in
+      1) PROTO="udp"; break ;;
+      2) PROTO="tcp"; break ;;
+      *) warn "Выбери 1 или 2." ;;
+    esac
+  done
+
+  PORT="$(prompt_with_default "${PROTO^^}-порт OpenVPN" "$PORT")"
 
   detected_wan="$(ip -4 route show default | awk 'NR==1 {print $5}')"
   if [[ -n "$detected_wan" ]]; then
@@ -180,8 +201,12 @@ if (( INTERACTIVE_INSTALL )); then
   fi
 
   echo
-  if prompt_yes_no "Нужна совместимость со старыми tls-crypt-v2 клиентами (allow-noncookie)?" no; then
-    TLS_COOKIE="allow-noncookie"
+  if [[ "$PROTO" == "udp" ]]; then
+    if prompt_yes_no "Нужна совместимость со старыми tls-crypt-v2 клиентами (allow-noncookie)?" no; then
+      TLS_COOKIE="allow-noncookie"
+    fi
+  else
+    echo "TCP выбран: UDP cookie-handshake force-cookie не применяется; tls-crypt-v2 остаётся включённым."
   fi
 
   echo
@@ -200,6 +225,8 @@ validate_endpoint "$ENDPOINT"
 [[ "$PORT" =~ ^[0-9]{1,5}$ ]] || die "Некорректный порт: $PORT"
 PORT=$((10#$PORT))
 (( PORT >= 1 && PORT <= 65535 )) || die "Некорректный порт: $PORT"
+[[ "$PROTO" == "udp" || "$PROTO" == "tcp" ]] ||
+  die "--proto должен быть udp или tcp."
 [[ "$MODE" == "split" || "$MODE" == "full" ]] ||
   die "--mode должен быть split или full."
 [[ "$MAX_CLIENTS" =~ ^[0-9]{1,4}$ ]] || die "--max-clients должен быть числом."
@@ -261,14 +288,18 @@ while read -r dest rest; do
 done < <(ip -4 route show)
 
 info "Конфигурация:"
-echo "  Endpoint:       $ENDPOINT:$PORT/udp"
+echo "  Endpoint:       $ENDPOINT:$PORT/$PROTO"
 echo "  WAN:            $WAN_IF"
 echo "  VPN subnet:     $VPN_CIDR"
 echo "  Mode:           $MODE"
 echo "  Max clients:    $MAX_CLIENTS"
 echo "  LAN routes:     ${LANS[*]:-(нет)}"
 echo "  DNS(full):      ${DNS_SERVERS[*]:-(нет)}"
-echo "  tls-crypt-v2:   $TLS_COOKIE"
+if [[ "$PROTO" == "udp" ]]; then
+  echo "  tls-crypt-v2:   $TLS_COOKIE"
+else
+  echo "  tls-crypt-v2:   enabled (cookie mode: n/a for TCP)"
+fi
 if (( CA_NOPASS )); then
   warn "CA private key будет БЕЗ пароля (--ca-nopass)."
 else
@@ -334,17 +365,21 @@ if systemctl is-active --quiet "openvpn-server@$SERVER_NAME.service" &&
   managed_instance=1
 fi
 
-listeners="$(ss -H -lunp "sport = :$PORT" 2>/dev/null || true)"
+if [[ "$PROTO" == "udp" ]]; then
+  listeners="$(ss -H -lunp "sport = :$PORT" 2>/dev/null || true)"
+else
+  listeners="$(ss -H -ltnp "sport = :$PORT" 2>/dev/null || true)"
+fi
 if [[ -n "$listeners" ]]; then
   foreign_listeners="$(printf '%s\n' "$listeners" | grep -vi 'openvpn' || true)"
   if [[ -n "$foreign_listeners" ]]; then
     echo "$foreign_listeners" >&2
-    die "UDP/$PORT занят процессом, который не относится к OpenVPN."
+    die "${PROTO^^}/$PORT занят процессом, который не относится к OpenVPN."
   fi
 
   if (( ! managed_instance )); then
     echo "$listeners" >&2
-    die "UDP/$PORT уже занят неизвестным OpenVPN instance. Не пытаюсь его перехватить."
+    die "${PROTO^^}/$PORT уже занят неизвестным OpenVPN instance. Не пытаюсь его перехватить."
   fi
 fi
 
@@ -629,7 +664,7 @@ trap 'rm -f "${tmp_config:-}"' EXIT
   printf '# Managed by pve-openvpn-kit; shell assignments, mode 0600.\n'
   printf 'OVPN_ENDPOINT=%q\n' "$ENDPOINT"
   printf 'OVPN_PORT=%q\n' "$PORT"
-  printf 'OVPN_PROTO=%q\n' "udp"
+  printf 'OVPN_PROTO=%q\n' "$PROTO"
   printf 'OVPN_WAN_IF=%q\n' "$WAN_IF"
   printf 'OVPN_VPN_CIDR=%q\n' "$VPN_CIDR"
   printf 'OVPN_MODE=%q\n' "$MODE"
@@ -748,7 +783,7 @@ echo "Профили:"
 echo "  $CLIENT_DIR/*.ovpn"
 echo
 echo "ВАЖНО:"
-echo "  * если сервер за NAT — пробрось UDP/$PORT на IP Proxmox;"
-echo "  * если включён PVE Firewall — разреши UDP/$PORT штатным правилом PVE;"
+echo "  * если сервер за NAT — пробрось ${PROTO^^}/$PORT на IP Proxmox;"
+echo "  * если включён PVE Firewall — разреши ${PROTO^^}/$PORT штатным правилом PVE;"
 echo "  * для доступа к GUI/SSH через VPN разреши нужные host INPUT-порты от $VPN_CIDR;"
 echo "  * реальные PKI/private keys не храни в git."

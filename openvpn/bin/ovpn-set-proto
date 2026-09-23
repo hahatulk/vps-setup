@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source /usr/local/lib/pve-openvpn/common.sh
+require_root
+require_cmd flock
+require_cmd systemctl
+require_cmd ss
+load_config
+require_interactive_tty
+(($# == 0)) || die "ovpn-set-proto не принимает аргументы. Запусти просто: ovpn-set-proto"
+
+secure_profile() {
+  local f="$1" mode
+  [[ -f "$f" && ! -L "$f" ]] || return 1
+  [[ "$(stat -c '%u' "$f")" == 0 ]] || return 1
+  mode="$(stat -c '%a' "$f")"
+  (( (8#$mode & 0077) == 0 )) || return 1
+  [[ "$(grep -Ec '^[[:space:]]*proto[[:space:]]+(udp|tcp-client)[[:space:]]*$' "$f" || true)" == 1 ]] || return 1
+  [[ "$(awk -v e="$OVPN_ENDPOINT" '$1=="remote"&&$2==e&&NF>=3{n++}END{print n+0}' "$f")" == 1 ]] || return 1
+  grep -Fqx "verify-x509-name $OVPN_SERVER_NAME name" "$f" || return 1
+  grep -Fqx '<key>' "$f" || return 1
+  grep -Fqx '<tls-crypt-v2>' "$f" || return 1
+}
+
+convert_profile() {
+  local f="$1" cp="$2" port="$3" tmp
+  secure_profile "$f" || { warn "Небезопасный/неожиданный профиль: $f"; return 1; }
+  tmp="$(mktemp "$OVPN_CLIENT_DIR/.proto.$(basename "$f").XXXXXX")"
+  if ! awk -v p="$cp" -v e="$OVPN_ENDPOINT" -v port="$port" '
+    /^[[:space:]]*proto[[:space:]]+(udp|tcp-client)[[:space:]]*$/ {print "proto " p; next}
+    $1=="remote" && $2==e && NF>=3 {print "remote " e " " port; next}
+    {print}
+  ' "$f" > "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chown root:root "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$f" || { rm -f -- "$tmp"; return 1; }
+}
+
+profiles=()
+collect_profiles() {
+  local f
+  profiles=()
+  shopt -s nullglob
+  for f in "$OVPN_CLIENT_DIR"/*.ovpn; do
+    [[ -f "$f" && ! -L "$f" ]] && profiles+=("$f")
+  done
+  shopt -u nullglob
+}
+
+pick_profile() {
+  local i c
+  collect_profiles
+  if ((${#profiles[@]} == 0)); then
+    warn "Сохранённых .ovpn нет."
+    return 1
+  fi
+  for i in "${!profiles[@]}"; do printf '  %d) %s\n' "$((i+1))" "$(basename "${profiles[$i]}")" >&2; done
+  echo "  0) Отмена" >&2
+  while true; do
+    read -r -p "Номер: " c || die "Ввод прерван."
+    [[ "$c" =~ ^[0-9]+$ ]] || { warn "Введи номер."; continue; }
+    c=$((10#$c))
+    ((c==0)) && return 1
+    ((c>=1 && c<=${#profiles[@]})) && { printf '%s\n' "${profiles[$((c-1))]}"; return 0; }
+    warn "Нет такого пункта."
+  done
+}
+
+listener_free() {
+  local proto="$1" port="$2" x
+  if [[ "$proto" == "$OVPN_PROTO" && "$port" == "$OVPN_PORT" ]] &&
+     systemctl is-active --quiet "openvpn-server@${OVPN_SERVER_NAME}.service"; then
+    return 0
+  fi
+  if [[ "$proto" == udp ]]; then x="$(ss -H -lunp "sport = :$port" 2>/dev/null || true)"
+  else x="$(ss -H -ltnp "sport = :$port" 2>/dev/null || true)"; fi
+  [[ -z "$x" ]] || { echo "$x" >&2; die "${proto^^}/$port уже занят."; }
+}
+
+initial_proto="$OVPN_PROTO"
+initial_port="$OVPN_PORT"
+initial_cookie="$OVPN_TLS_CRYPT_V2_COOKIE"
+
+echo "=== TCP/UDP OpenVPN ==="
+echo "Сейчас: $OVPN_PROTO/$OVPN_PORT"
+echo "  1) UDP"
+echo "  2) TCP"
+echo "  3) Только синхронизировать .ovpn с текущим сервером"
+echo "  0) Отмена"
+while true; do
+  read -r -p "Выбор: " c || die "Ввод прерван."
+  case "$c" in
+    1) target=udp; sync_only=0; break;;
+    2) target=tcp; sync_only=0; break;;
+    3) target="$OVPN_PROTO"; sync_only=1; break;;
+    0) exit 0;;
+    *) warn "Выбери 0..3.";;
+  esac
+done
+
+port="$OVPN_PORT"; cookie="$OVPN_TLS_CRYPT_V2_COOKIE"
+if (( ! sync_only )); then
+  port="$(prompt_with_default "${target^^}-порт OpenVPN" "$OVPN_PORT")"
+  [[ "$port" =~ ^[0-9]{1,5}$ ]] || die "Некорректный порт."
+  port=$((10#$port)); ((port>=1&&port<=65535)) || die "Некорректный порт."
+  if [[ "$target" == udp ]]; then
+    echo "  1) force-cookie (рекомендуется)"
+    echo "  2) allow-noncookie"
+    d=1; [[ "$cookie" == allow-noncookie ]] && d=2
+    while true; do
+      read -r -p "UDP cookie mode [$d]: " c || die "Ввод прерван."
+      c="${c:-$d}"
+      case "$c" in 1) cookie=force-cookie; break;; 2) cookie=allow-noncookie; break;; *) warn "1 или 2";; esac
+    done
+  fi
+  listener_free "$target" "$port"
+fi
+
+echo
+echo "Профили:"
+echo "  1) Все сохранённые"
+echo "  2) Один профиль"
+echo "  3) Не менять"
+echo "  0) Отмена"
+read -r -p "Выбор [1]: " pc || die "Ввод прерван."
+pc="${pc:-1}"
+selected=()
+case "$pc" in
+  1) collect_profiles; selected=("${profiles[@]}");;
+  2) f="$(pick_profile)" || exit 0; selected=("$f");;
+  3) ;;
+  0) exit 0;;
+  *) die "Неверный выбор.";;
+esac
+
+cp="$(openvpn_client_proto "$target")" || die "Неизвестный transport."
+for f in "${selected[@]}"; do secure_profile "$f" || die "Preflight профиля не пройден: $f"; done
+
+if (( ! sync_only )) && ((${#selected[@]} == 0)); then
+  warn "Ни один сохранённый .ovpn не будет обновлён."
+  warn "Уже импортированные или scrub-нутые профили нужно обновить на клиентских устройствах вручную."
+fi
+
+if (( sync_only )); then
+  ((${#selected[@]})) || { info "Нет профилей для синхронизации."; exit 0; }
+  prompt_yes_no "Синхронизировать ${#selected[@]} профилей с $OVPN_PROTO/$OVPN_PORT?" no || exit 0
+  install -d -o root -g root -m 0700 /run/pve-openvpn
+  exec 7>/run/pve-openvpn/config.lock; flock -x -w 30 7 || die "Конфигурация занята."
+  acquire_pki_lock
+  load_config
+  [[ "$OVPN_PROTO" == "$initial_proto" && "$OVPN_PORT" == "$initial_port" ]] ||
+    die "Transport/port изменились другой операцией. Запусти команду заново."
+  for f in "${selected[@]}"; do
+    secure_profile "$f" || die "Профиль изменился после preflight: $f"
+    convert_profile "$f" "$cp" "$OVPN_PORT" || die "Не удалось обновить $(basename "$f")."
+    info "Обновлён $(basename "$f")"
+  done
+  exit 0
+fi
+
+echo
+warn "Смена транспорта перезапустит OpenVPN и оборвёт текущие VPN-сессии."
+warn "Старые импортированные профили с другим proto/port после переключения подключаться не будут."
+echo "Сервер: $OVPN_PROTO/$OVPN_PORT -> $target/$port"
+echo "Профилей к обновлению: ${#selected[@]}"
+prompt_yes_no "Применить?" no || exit 0
+
+install -d -o root -g root -m 0700 /run/pve-openvpn
+exec 7>/run/pve-openvpn/config.lock; flock -x -w 30 7 || die "Конфигурация занята."
+acquire_pki_lock
+load_config
+[[ "$OVPN_PROTO" == "$initial_proto" && "$OVPN_PORT" == "$initial_port" &&
+   "$OVPN_TLS_CRYPT_V2_COOKIE" == "$initial_cookie" ]] ||
+  die "Transport/port/cookie изменились другой операцией. Запусти команду заново."
+listener_free "$target" "$port"
+
+for key in OVPN_PROTO OVPN_PORT OVPN_TLS_CRYPT_V2_COOKIE; do
+  [[ "$(grep -c "^${key}=" "$CONFIG_FILE" || true)" == "1" ]] ||
+    die "Неожиданный формат $CONFIG_FILE: нужен ровно один ${key}=..."
+done
+for f in "${selected[@]}"; do
+  secure_profile "$f" || die "Профиль изменился после preflight: $f"
+done
+
+txn="$(mktemp -d /run/pve-openvpn/proto.XXXXXX)"; chmod 0700 "$txn"
+trap 'rm -rf -- "$txn"' EXIT
+cp -p "$CONFIG_FILE" "$txn/config"
+for f in "${selected[@]}"; do cp -p "$f" "$txn/$(basename "$f")"; done
+
+awk -v p="$target" -v n="$port" -v c="$cookie" '
+ /^OVPN_PROTO=/ {print "OVPN_PROTO=\"" p "\""; next}
+ /^OVPN_PORT=/ {print "OVPN_PORT=\"" n "\""; next}
+ /^OVPN_TLS_CRYPT_V2_COOKIE=/ {print "OVPN_TLS_CRYPT_V2_COOKIE=\"" c "\""; next}
+ {print}
+' "$CONFIG_FILE" > "$txn/new"
+install -o root -g root -m 0600 "$txn/new" "$CONFIG_FILE"
+
+rollback() {
+  warn "Откат..."
+  install -o root -g root -m 0600 "$txn/config" "$CONFIG_FILE" || true
+  for f in "${selected[@]}"; do [[ -f "$txn/$(basename "$f")" ]] && install -o root -g root -m 0600 "$txn/$(basename "$f")" "$f"; done
+  /usr/local/lib/pve-openvpn/pve-openvpn-render-server >/dev/null 2>&1 || true
+  systemctl restart "openvpn-server@${OVPN_SERVER_NAME}.service" >/dev/null 2>&1 || {
+    systemctl stop "openvpn-server@${OVPN_SERVER_NAME}.service" >/dev/null 2>&1 || true
+    return 1
+  }
+}
+
+if ! /usr/local/lib/pve-openvpn/pve-openvpn-render-server || ! systemctl restart "openvpn-server@${OVPN_SERVER_NAME}.service"; then
+  rollback || die "CRITICAL: rollback не удался; OpenVPN остановлен."
+  die "Новый transport не применён; старый восстановлен."
+fi
+
+for f in "${selected[@]}"; do
+  if ! convert_profile "$f" "$cp" "$port"; then
+    rollback || die "CRITICAL: rollback не удался; OpenVPN остановлен."
+    die "Не удалось конвертировать $(basename "$f"); сервер и профили восстановлены."
+  fi
+  info "Обновлён $(basename "$f")"
+done
+trap - EXIT; rm -rf -- "$txn"
+info "Сервер переключён на $target/$port."
+echo "Обнови port-forward/PVE Firewall на ${target^^}/$port и переимпортируй изменённые .ovpn."

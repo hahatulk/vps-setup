@@ -29,6 +29,7 @@ openvpn/
 │   ├── ovpn-revoke-client
 │   ├── ovpn-scrub-client-secret
 │   ├── ovpn-set-mode
+│   ├── ovpn-set-proto
 │   └── ovpn-status
 ├── lib/
 │   ├── common.sh
@@ -75,21 +76,28 @@ sudo ./install.sh
 Без аргументов установщик запускает мастер и последовательно спрашивает:
 
 1. публичный IPv4 или DNS VPN-сервера;
-2. UDP-порт;
-3. WAN/bridge интерфейс, обычно `vmbr0`;
-4. VPN subnet;
-5. лимит клиентов;
-6. split/full режим;
-7. LAN/VM сети;
-8. DNS для full-tunnel;
-9. совместимость tls-crypt-v2;
-10. нужно ли защищать CA passphrase;
-11. финальное подтверждение перед изменением системы.
+2. транспорт OpenVPN: UDP или TCP;
+3. порт OpenVPN;
+4. WAN/bridge интерфейс, обычно `vmbr0`;
+5. VPN subnet;
+6. лимит клиентов;
+7. split/full режим;
+8. LAN/VM сети;
+9. DNS для full-tunnel;
+10. совместимость tls-crypt-v2 cookie handshake в UDP-режиме;
+11. нужно ли защищать CA passphrase;
+12. финальное подтверждение перед изменением системы.
 
 Пример вопросов:
 
 ```text
 Публичный IPv4 или DNS-имя VPN: vpn.example.com
+
+Транспорт OpenVPN:
+  1) UDP — рекомендуется
+  2) TCP — если UDP блокируется
+Выбор [1]: 1
+
 UDP-порт OpenVPN [1194]:
 WAN/bridge интерфейс [vmbr0]:
 VPN IPv4 subnet [10.8.0.0/24]:
@@ -139,8 +147,9 @@ sudo ovpn
 4) Отозвать клиента
 5) Удалить серверные копии client secrets
 6) Переключить split/full tunnel
-7) Перезапустить OpenVPN
-8) Показать последние логи OpenVPN
+7) TCP/UDP сервера + конвертация .ovpn
+8) Перезапустить OpenVPN
+9) Показать последние логи OpenVPN
 0) Выход
 ```
 
@@ -170,7 +179,7 @@ sudo ovpn-add-client
 /root/openvpn-clients/<client>.ovpn
 ```
 
-Файл содержит client private key и уникальный tls-crypt-v2 transport key, поэтому его нужно считать секретом.
+Файл содержит client private key и уникальный tls-crypt-v2 transport key, поэтому его нужно считать секретом. Транспорт подставляется автоматически из серверной конфигурации: для UDP профиль получает `proto udp`, для TCP — `proto tcp-client`; вручную менять клиентский transport не нужно.
 
 ### Список клиентов
 
@@ -234,6 +243,43 @@ sudo ovpn-set-mode
 
 Перед применением будет отдельное подтверждение.
 
+### Переключить UDP/TCP и конвертировать профили
+
+```bash
+sudo ovpn-set-proto
+```
+
+Команда полностью интерактивная. Она показывает текущий transport/port и предлагает:
+
+```text
+1) UDP
+2) TCP
+3) Только синхронизировать .ovpn с текущим сервером
+0) Отмена
+```
+
+При переключении можно оставить текущий порт или выбрать новый. Затем можно:
+
+```text
+1) синхронизировать все сохранённые .ovpn
+2) выбрать один .ovpn
+3) изменить только сервер
+```
+
+Преобразование делается без перевыпуска сертификата и private key:
+
+```text
+UDP server:  proto udp
+UDP client:  proto udp
+
+TCP server:  proto tcp-server
+TCP client:  proto tcp-client
+```
+
+Если меняется порт, строка `remote` в выбранных профилях также обновляется. Перед изменением скрипт проверяет формат и права профилей. Серверная конфигурация и выбранные `.ovpn` резервируются во временной root-only директории; при ошибке запуска нового server transport выполняется rollback.
+
+После изменения транспорта проверь внешний NAT/port-forward и PVE Firewall: они должны разрешать **новый transport и port**. Уже импортированные на телефоны/ноутбуки старые профили автоматически не меняются — обновлённый `.ovpn` нужно переимпортировать либо вручную синхронизировать соответствующий клиент.
+
 ### Перезапустить OpenVPN
 
 ```bash
@@ -279,12 +325,21 @@ sudo ovpn-status
 
 ## 5. Port forward
 
-Если Proxmox находится за роутером, пробрось выбранный UDP-порт на IP Proxmox.
+Если Proxmox находится за роутером, пробрось **тот же транспорт и порт**, которые выбраны в мастере.
 
-Для стандартного порта:
+Для стандартного UDP-варианта:
 
 ```text
 Protocol:      UDP
+External:      1194
+Internal host: IP Proxmox
+Internal port: 1194
+```
+
+Если в мастере выбран TCP, правило должно быть TCP, например:
+
+```text
+Protocol:      TCP
 External:      1194
 Internal host: IP Proxmox
 Internal port: 1194
@@ -298,7 +353,7 @@ Internal port: 1194
 
 Набор **не открывает широкий INPUT автоматически**.
 
-Если PVE Firewall включён, разреши выбранный UDP OpenVPN port штатным правилом PVE.
+Если PVE Firewall включён, разреши выбранный **TCP или UDP** OpenVPN port штатным правилом PVE — строго тот транспорт, который выбран при установке.
 
 Для доступа через VPN к самому Proxmox отдельно разреши только нужные host ports из VPN subnet, например:
 

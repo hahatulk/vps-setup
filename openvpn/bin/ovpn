@@ -32,8 +32,9 @@ while true; do
   echo "  4) Отозвать клиента"
   echo "  5) Удалить серверные копии client secrets"
   echo "  6) Переключить split/full tunnel"
-  echo "  7) Перезапустить OpenVPN"
-  echo "  8) Показать последние логи OpenVPN"
+  echo "  7) TCP/UDP сервера + конвертация .ovpn"
+  echo "  8) Перезапустить OpenVPN"
+  echo "  9) Показать последние логи OpenVPN"
   echo "  0) Выход"
   echo
 
@@ -45,8 +46,9 @@ while true; do
     4) run_action /usr/local/sbin/ovpn-revoke-client ;;
     5) run_action /usr/local/sbin/ovpn-scrub-client-secret ;;
     6) run_action /usr/local/sbin/ovpn-set-mode ;;
-    7) run_action /usr/local/sbin/ovpn-restart ;;
-    8)
+    7) run_action /usr/local/sbin/ovpn-set-proto ;;
+    8) run_action /usr/local/sbin/ovpn-restart ;;
+    9)
       echo
       journalctl -u "openvpn-server@${OVPN_SERVER_NAME}.service" -n 80 --no-pager || true
       echo

@@ -33,11 +33,19 @@ cidr_overlap 10.8.0.0/24 10.8.0.128/25 || fail "overlap true"
 if cidr_overlap 10.8.0.0/24 10.9.0.0/24; then fail "overlap false"; fi
 validate_endpoint vpn.example.com
 validate_endpoint 203.0.113.10
-ok "CIDR/endpoint validation"
+[[ "$(openvpn_server_proto udp)" == "udp" ]] || fail "UDP server proto mapping"
+[[ "$(openvpn_client_proto udp)" == "udp" ]] || fail "UDP client proto mapping"
+[[ "$(openvpn_server_proto tcp)" == "tcp-server" ]] || fail "TCP server proto mapping"
+[[ "$(openvpn_client_proto tcp)" == "tcp-client" ]] || fail "TCP client proto mapping"
+if openvpn_server_proto invalid >/dev/null 2>&1; then fail "invalid server proto accepted"; fi
+if openvpn_client_proto invalid >/dev/null 2>&1; then fail "invalid client proto accepted"; fi
+ok "CIDR/endpoint/proto validation"
 
 echo
 echo "== Interactive ovpn policy =="
-for f in bin/ovpn bin/ovpn-add-client bin/ovpn-list-clients bin/ovpn-restart          bin/ovpn-revoke-client bin/ovpn-scrub-client-secret bin/ovpn-set-mode bin/ovpn-status; do
+for f in bin/ovpn bin/ovpn-add-client bin/ovpn-list-clients bin/ovpn-restart \
+         bin/ovpn-revoke-client bin/ovpn-scrub-client-secret bin/ovpn-set-mode \
+         bin/ovpn-set-proto bin/ovpn-status; do
   [[ -f "$f" ]] || fail "missing $f"
   grep -Fq '($# == 0)' "$f" || fail "$f does not explicitly reject arguments"
   grep -Fq 'require_interactive_tty' "$f" || fail "$f is not explicitly interactive/TTY-only"

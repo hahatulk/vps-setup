@@ -18,13 +18,19 @@ show_summary() {
   openvpn --version | head -n1 || true
   echo
   printf 'Endpoint:       %s:%s/%s\n' "$OVPN_ENDPOINT" "$OVPN_PORT" "$OVPN_PROTO"
+  printf 'Server proto:   %s\n' "$(openvpn_server_proto "$OVPN_PROTO")"
+  printf 'Client proto:   %s\n' "$(openvpn_client_proto "$OVPN_PROTO")"
   printf 'WAN interface:  %s\n' "$OVPN_WAN_IF"
   printf 'VPN subnet:     %s\n' "$OVPN_VPN_CIDR"
   printf 'Mode:           %s\n' "$OVPN_MODE"
   printf 'Tunnel:         %s\n' "$OVPN_TUN_IF"
   printf 'Max clients:    %s\n' "$OVPN_MAX_CLIENTS"
   printf 'LAN routes:     %s\n' "${OVPN_LANS[*]:-(none)}"
-  printf 'tls-crypt-v2:   %s\n' "$OVPN_TLS_CRYPT_V2_COOKIE"
+  if [[ "$OVPN_PROTO" == "udp" ]]; then
+    printf 'tls-crypt-v2:   %s\n' "$OVPN_TLS_CRYPT_V2_COOKIE"
+  else
+    printf 'tls-crypt-v2:   enabled (cookie mode: n/a for TCP)\n'
+  fi
   echo
   printf 'OpenVPN service: '
   systemctl is-active "openvpn-server@${OVPN_SERVER_NAME}.service" 2>/dev/null || true
@@ -34,7 +40,11 @@ show_summary() {
   sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "unknown"
   echo
   ip -br addr show "$OVPN_TUN_IF" 2>/dev/null || echo "$OVPN_TUN_IF отсутствует"
-  ss -lntup 2>/dev/null | grep -E "[:.]$OVPN_PORT([[:space:]]|$)" || echo "Listener на порту $OVPN_PORT не найден"
+  if [[ "$OVPN_PROTO" == "udp" ]]; then
+    ss -lunp 2>/dev/null | grep -E "[:.]$OVPN_PORT([[:space:]]|$)" || echo "UDP listener на порту $OVPN_PORT не найден"
+  else
+    ss -ltnp 2>/dev/null | grep -E "[:.]$OVPN_PORT([[:space:]]|$)" || echo "TCP listener на порту $OVPN_PORT не найден"
+  fi
 }
 
 show_pki() {

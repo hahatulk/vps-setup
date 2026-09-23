@@ -118,13 +118,13 @@ clients:
 
 Каждый клиент получает отдельный wrapped key.
 
-По умолчанию server config использует:
+В UDP-режиме server config по умолчанию использует:
 
 ```text
 force-cookie
 ```
 
-Это требует tls-crypt-v2 client с поддержкой cookie handshake и лучше защищает сервер от replay/state-exhaustion атак.
+Cookie-based stateless handshake относится к UDP и снижает риск replay/state-exhaustion до выделения полноценного состояния соединения. В TCP-режиме этот UDP cookie mode не применяется, но уникальные per-client `tls-crypt-v2` ключи сохраняются.
 
 Для совместимости можно установить сервер с:
 
@@ -304,7 +304,7 @@ PVE-OVPN-NAT
 
 Набор не создаёт широкое INPUT allow rule.
 
-UDP-порт OpenVPN разрешай штатно в PVE Firewall.
+Порт OpenVPN разрешай штатно в PVE Firewall только для выбранного транспорта: UDP или TCP.
 
 Для доступа к самому Proxmox через VPN также создай INPUT правила только от VPN subnet на нужные порты, например:
 
@@ -361,15 +361,29 @@ DNS push применяется только в full mode.
 
 ## Endpoint / NAT / CGNAT
 
-Если сервер за NAT, нужен port-forward UDP-порта на Proxmox.
+Если сервер за NAT, нужен port-forward выбранного транспорта и порта (UDP или TCP) на Proxmox.
 
 CGNAT у провайдера может делать входящее подключение невозможным. В этом случае понадобится публичный relay/VPS, IPv6-доступ или иной overlay design.
 
 ---
 
+## Смена UDP/TCP
+
+`ovpn-set-proto` меняет transport сервера транзакционно и может синхронизировать сохранённые клиентские `.ovpn`.
+
+Для TCP сервер использует `proto tcp-server`, а клиентский профиль — `proto tcp-client`. Для UDP обе стороны используют `proto udp`.
+
+Перед изменением проверяется выбранный TCP/UDP listener. Конвертируются только root-owned `.ovpn` без group/other permissions, находящиеся в защищённом client directory и имеющие ожидаемую структуру этого сервера. Изменение `proto` и `remote ... PORT` выполняется через временный файл с mode `0600` и атомарный `mv`.
+
+При ошибке запуска нового server transport набор пытается восстановить старый `/etc/openvpn/pve-openvpn.conf`, server config и сохранённые client profiles. Если rollback сервера не удаётся, OpenVPN останавливается fail-closed.
+
+Важно: toolkit не может автоматически изменить профиль, который уже импортирован на отдельный телефон/ноутбук, и не управляет внешним router/PVE Firewall правилом. После `UDP ↔ TCP` синхронизируй port-forward/firewall и переимпортируй обновлённый профиль на клиенте.
+
+---
+
 ## Port conflicts
 
-Установщик проверяет, занят ли выбранный UDP-порт другим процессом. Если порт занят не OpenVPN, установка останавливается до изменения конфигурации.
+Установщик проверяет, занят ли выбранный порт **на выбранном транспорте** другим процессом: UDP socket проверяется отдельно от TCP socket. Если соответствующий порт занят не OpenVPN, установка останавливается до изменения конфигурации.
 
 ---
 
