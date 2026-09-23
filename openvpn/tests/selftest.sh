@@ -55,6 +55,19 @@ done
 ok "ovpn commands are zero-argument user interfaces"
 
 echo
+echo "== Installer update-only ordering =="
+update_line="$(grep -n 'if managed_install_present; then' install.sh | head -n1 | cut -d: -f1)"
+prompt_line="$(grep -n 'if (( INTERACTIVE_INSTALL )); then' install.sh | head -n1 | cut -d: -f1)"
+apt_line="$(grep -n 'apt-get update' install.sh | head -n1 | cut -d: -f1)"
+[[ "$update_line" =~ ^[0-9]+$ && "$prompt_line" =~ ^[0-9]+$ && "$apt_line" =~ ^[0-9]+$ ]] ||
+  fail "cannot locate update/prompt/apt sections"
+(( update_line < prompt_line && update_line < apt_line )) ||
+  fail "managed update-only path must run before prompts and apt"
+grep -Fq 'update_tooling_only update' install.sh || fail "missing update-only tooling call"
+grep -Fq 'update_tooling_only initial' install.sh || fail "missing initial tooling call"
+ok "existing managed install updates tooling before prompts/apt"
+
+echo
 echo "== PKI example / Git safety =="
 for expected in   pki-example/README.md   pki-example/pki/README.md   pki-example/pki/vars.example   pki-example/pki/private/.gitkeep   pki-example/pki/issued/.gitkeep   pki-example/pki/reqs/.gitkeep   pki-example/pki/certs_by_serial/.gitkeep   pki-example/pki/revoked/.gitkeep   pki-example/pki/inline/.gitkeep   pki-example/pki/tls-crypt-v2-clients/.gitkeep   pki-example/pki/secret-scrubbed/.gitkeep; do
   [[ -e "$expected" ]] || fail "missing PKI placeholder $expected"

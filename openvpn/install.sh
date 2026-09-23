@@ -31,6 +31,115 @@ assert_managed_file_or_absent() {
   grep -Fq "$marker" "$file" || die "Не перезаписываю чужой $file."
 }
 
+atomic_install_file() {
+  local src="$1" dst="$2" mode="$3" dir base tmp
+
+  [[ -f "$src" && ! -L "$src" ]] || die "Источник для установки должен быть regular file, не symlink: $src"
+  dir="$(dirname -- "$dst")"
+  base="$(basename -- "$dst")"
+  require_secure_root_dir "$dir"
+
+  tmp="$(mktemp "$dir/.${base}.new.XXXXXX")"
+  if ! install -o root -g root -m "$mode" "$src" "$tmp"; then
+    rm -f -- "$tmp"
+    die "Не удалось подготовить обновление $dst."
+  fi
+  if ! mv -fT -- "$tmp" "$dst"; then
+    rm -f -- "$tmp"
+    die "Не удалось атомарно заменить $dst."
+  fi
+}
+
+managed_install_present() {
+  # Этот marker создаётся только нашим installer-ом. Для update-only достаточно
+  # защищённого root-owned config: даже если server.conf временно сломан/удалён,
+  # повторный install.sh не должен внезапно запускать первичный мастер.
+  [[ -f "$CONFIG_FILE" && ! -L "$CONFIG_FILE" ]] || return 1
+  secure_root_file "$CONFIG_FILE" || return 1
+  grep -Fqx '# Managed by pve-openvpn-kit; shell assignments, mode 0600.' "$CONFIG_FILE"
+}
+
+update_tooling_only() {
+  local mode="${1:-update}" target f legacy
+
+  if [[ "$mode" == "update" ]]; then
+    info "Обнаружена существующая установка pve-openvpn-kit."
+    info "Обновляю только управляющие скрипты и внутренние helpers."
+    echo "  OpenVPN packages:  не трогаю"
+    echo "  PKI/CA:            не трогаю"
+    echo "  server.conf:       не трогаю"
+    echo "  firewall/systemd:  не перезапускаю"
+    echo
+  else
+    info "Устанавливаю управляющие скрипты и внутренние helpers..."
+  fi
+
+  if [[ -e /usr/local/lib/pve-openvpn || -L /usr/local/lib/pve-openvpn ]]; then
+    require_secure_root_dir /usr/local/lib/pve-openvpn
+  fi
+  require_secure_root_dir /usr/local/sbin
+
+  for target in \
+    /usr/local/lib/pve-openvpn/common.sh \
+    /usr/local/lib/pve-openvpn/verify-crl-health \
+    /usr/local/lib/pve-openvpn/pve-openvpn-fw \
+    /usr/local/lib/pve-openvpn/pve-openvpn-render-server; do
+    if [[ -e "$target" || -L "$target" ]]; then
+      secure_root_file "$target" ||
+        die "Не перезаписываю небезопасный/не-root-owned $target."
+      case "$target" in
+        */common.sh)
+          grep -Fq 'CONFIG_FILE="/etc/openvpn/pve-openvpn.conf"' "$target" ||
+            die "Не перезаписываю чужой $target."
+          ;;
+        */verify-crl-health)
+          grep -Fq 'CRL="/etc/openvpn/server/crl.pem"' "$target" ||
+            die "Не перезаписываю чужой $target."
+          ;;
+        *)
+          grep -Fq '/usr/local/lib/pve-openvpn/common.sh' "$target" ||
+            die "Не перезаписываю чужой внутренний helper $target."
+          ;;
+      esac
+    fi
+  done
+
+  for f in "$SCRIPT_DIR"/bin/ovpn*; do
+    target="/usr/local/sbin/$(basename "$f")"
+    if [[ -e "$target" || -L "$target" ]]; then
+      secure_root_file "$target" ||
+        die "Не перезаписываю небезопасную/не-root-owned команду $target."
+      grep -Fq '/usr/local/lib/pve-openvpn/common.sh' "$target" ||
+        die "Не перезаписываю чужую команду $target. Удали/переименуй её вручную."
+    fi
+  done
+
+  install -d -o root -g root -m 0755 /usr/local/lib/pve-openvpn /usr/local/sbin
+  atomic_install_file "$SCRIPT_DIR/lib/common.sh" /usr/local/lib/pve-openvpn/common.sh 0644
+  atomic_install_file "$SCRIPT_DIR/lib/verify-crl-health" /usr/local/lib/pve-openvpn/verify-crl-health 0755
+  atomic_install_file "$SCRIPT_DIR/lib/pve-openvpn-fw" /usr/local/lib/pve-openvpn/pve-openvpn-fw 0755
+  atomic_install_file "$SCRIPT_DIR/lib/pve-openvpn-render-server" /usr/local/lib/pve-openvpn/pve-openvpn-render-server 0755
+
+  for f in "$SCRIPT_DIR"/bin/ovpn*; do
+    atomic_install_file "$f" "/usr/local/sbin/$(basename "$f")" 0755
+  done
+
+  for legacy in /usr/local/sbin/ovpn-fw /usr/local/sbin/ovpn-render-server; do
+    if [[ -f "$legacy" && ! -L "$legacy" ]] &&
+       grep -Fq '/usr/local/lib/pve-openvpn/common.sh' "$legacy"; then
+      rm -f -- "$legacy"
+    elif [[ -e "$legacy" || -L "$legacy" ]]; then
+      warn "Найден чужой/изменённый legacy path $legacy; не удаляю его автоматически."
+    fi
+  done
+
+  if [[ "$mode" == "update" ]]; then
+    info "Скрипты обновлены. Работающий OpenVPN не изменялся и не перезапускался."
+  else
+    info "Управляющие скрипты установлены."
+  fi
+}
+
 usage() {
   cat <<'EOF'
 Установка OpenVPN для Proxmox VE 9 / Debian 13.
@@ -128,6 +237,23 @@ while (($#)); do
 done
 
 require_root
+
+# Повторный запуск на существующей установке этого набора — это updater.
+# Никаких prompt-ов, apt, PKI, firewall/systemd изменений или restart.
+if managed_install_present; then
+  require_cmd flock
+  if [[ -e /run/pve-openvpn || -L /run/pve-openvpn ]]; then
+    [[ -d /run/pve-openvpn && ! -L /run/pve-openvpn ]] ||
+      die "Небезопасный runtime directory: /run/pve-openvpn"
+  fi
+  install -d -o root -g root -m 0700 /run/pve-openvpn
+  exec 7>/run/pve-openvpn/config.lock
+  flock -x -w 30 7 || die "Конфигурация занята другой операцией. Повтори позже."
+  acquire_pki_lock
+
+  update_tooling_only update
+  exit 0
+fi
 
 if (( INTERACTIVE_INSTALL )); then
   require_interactive_tty
@@ -327,9 +453,22 @@ assert_managed_file_or_absent /etc/systemd/system/pve-openvpn-fw.service 'Descri
 assert_managed_file_or_absent "/etc/systemd/system/openvpn-server@$SERVER_NAME.service.d/10-pve-openvpn-security.conf" 'Requires=pve-openvpn-fw.service'
 
 export DEBIAN_FRONTEND=noninteractive
-info "Устанавливаю зависимости..."
-apt-get update
-apt-get install -y   openvpn   easy-rsa   iptables   ca-certificates   openssl   util-linux   iproute2   kmod
+require_cmd dpkg-query
+packages=(openvpn easy-rsa iptables ca-certificates openssl util-linux iproute2 kmod)
+missing_packages=()
+for pkg in "${packages[@]}"; do
+  if ! dpkg-query -W -f='${Status}\n' "$pkg" 2>/dev/null | grep -Fqx 'install ok installed'; then
+    missing_packages+=("$pkg")
+  fi
+done
+
+if ((${#missing_packages[@]} > 0)); then
+  info "Устанавливаю только недостающие зависимости: ${missing_packages[*]}"
+  apt-get update
+  apt-get install -y "${missing_packages[@]}"
+else
+  info "Все зависимости уже установлены; apt пропускаю."
+fi
 
 require_cmd openvpn
 require_cmd openssl
@@ -390,66 +529,7 @@ fi
 # Serialize every persistent change with management commands and uninstall.
 acquire_pki_lock
 
-info "Устанавливаю управляющие команды..."
-if [[ -e /usr/local/lib/pve-openvpn || -L /usr/local/lib/pve-openvpn ]]; then
-  require_secure_root_dir /usr/local/lib/pve-openvpn
-fi
-require_secure_root_dir /usr/local/sbin
-for target in \
-  /usr/local/lib/pve-openvpn/common.sh \
-  /usr/local/lib/pve-openvpn/verify-crl-health \
-  /usr/local/lib/pve-openvpn/pve-openvpn-fw \
-  /usr/local/lib/pve-openvpn/pve-openvpn-render-server; do
-  if [[ -e "$target" || -L "$target" ]]; then
-    secure_root_file "$target" ||
-      die "Не перезаписываю небезопасный/не-root-owned $target."
-    case "$target" in
-      */common.sh)
-        grep -Fq 'CONFIG_FILE="/etc/openvpn/pve-openvpn.conf"' "$target" ||
-          die "Не перезаписываю чужой $target."
-        ;;
-      */verify-crl-health)
-        grep -Fq 'CRL="/etc/openvpn/server/crl.pem"' "$target" ||
-          die "Не перезаписываю чужой $target."
-        ;;
-      *)
-        grep -Fq '/usr/local/lib/pve-openvpn/common.sh' "$target" ||
-          die "Не перезаписываю чужой внутренний helper $target."
-        ;;
-    esac
-  fi
-done
-
-for f in "$SCRIPT_DIR"/bin/ovpn*; do
-  target="/usr/local/sbin/$(basename "$f")"
-  if [[ -e "$target" || -L "$target" ]]; then
-    secure_root_file "$target" ||
-      die "Не перезаписываю небезопасную/не-root-owned команду $target."
-    grep -Fq '/usr/local/lib/pve-openvpn/common.sh' "$target" ||
-      die "Не перезаписываю чужую команду $target. Удали/переименуй её вручную."
-  fi
-done
-
-install -d -o root -g root -m 0755 /usr/local/lib/pve-openvpn /usr/local/sbin
-install -o root -g root -m 0644 "$SCRIPT_DIR/lib/common.sh" /usr/local/lib/pve-openvpn/common.sh
-install -o root -g root -m 0755 "$SCRIPT_DIR/lib/verify-crl-health" /usr/local/lib/pve-openvpn/verify-crl-health
-install -o root -g root -m 0755 "$SCRIPT_DIR/lib/pve-openvpn-fw" /usr/local/lib/pve-openvpn/pve-openvpn-fw
-install -o root -g root -m 0755 "$SCRIPT_DIR/lib/pve-openvpn-render-server" /usr/local/lib/pve-openvpn/pve-openvpn-render-server
-
-for f in "$SCRIPT_DIR"/bin/ovpn*; do
-  install -o root -g root -m 0755 "$f" "/usr/local/sbin/$(basename "$f")"
-done
-
-# Миграция со старой раскладки: внутренние helpers раньше ошибочно были
-# пользовательскими ovpn-* командами в /usr/local/sbin.
-for legacy in /usr/local/sbin/ovpn-fw /usr/local/sbin/ovpn-render-server; do
-  if [[ -f "$legacy" && ! -L "$legacy" ]] &&
-     grep -Fq '/usr/local/lib/pve-openvpn/common.sh' "$legacy"; then
-    rm -f -- "$legacy"
-  elif [[ -e "$legacy" || -L "$legacy" ]]; then
-    warn "Найден чужой/изменённый legacy path $legacy; не удаляю его автоматически."
-  fi
-done
+update_tooling_only initial
 
 info "Подготавливаю Easy-RSA..."
 if [[ -e "$EASYRSA_DIR" ]]; then

@@ -387,6 +387,23 @@ CGNAT у провайдера может делать входящее подк�
 
 ---
 
+## Обновление управляющих скриптов
+
+Повторный запуск `install.sh` на уже установленном `pve-openvpn-kit` работает в update-only режиме. Детектирование основано на root-owned regular files и маркерах набора, а не просто на наличии пакета `openvpn`.
+
+Update-only режим:
+
+- берёт config lock и PKI lock;
+- заменяет только `/usr/local/sbin/ovpn*` и `/usr/local/lib/pve-openvpn/*`;
+- не запускает `apt`;
+- не меняет PKI/CA/server config;
+- не меняет firewall/systemd configuration;
+- не перезапускает OpenVPN.
+
+Это уменьшает риск неожиданного outage при обычном обновлении toolkit. Чужие файлы в целевых путях не перезаписываются, если они не проходят проверки owner/type/marker.
+
+---
+
 ## Re-running installer
 
 Скрипт не должен автоматически перетирать:
