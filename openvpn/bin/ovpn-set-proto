@@ -23,12 +23,11 @@ secure_profile() {
 }
 
 convert_profile() {
-  local f="$1" cp="$2" port="$3" tmp
+  local f="$1" cp="$2" tmp
   secure_profile "$f" || { warn "Небезопасный/неожиданный профиль: $f"; return 1; }
   tmp="$(mktemp "$OVPN_CLIENT_DIR/.proto.$(basename "$f").XXXXXX")"
-  if ! awk -v p="$cp" -v e="$OVPN_ENDPOINT" -v port="$port" '
+  if ! awk -v p="$cp" '
     /^[[:space:]]*proto[[:space:]]+(udp|tcp-client)[[:space:]]*$/ {print "proto " p; next}
-    $1=="remote" && $2==e && NF>=3 {print "remote " e " " port; next}
     {print}
   ' "$f" > "$tmp"; then
     rm -f -- "$tmp"
@@ -146,7 +145,7 @@ fi
 
 if (( sync_only )); then
   ((${#selected[@]})) || { info "Нет профилей для синхронизации."; exit 0; }
-  prompt_yes_no "Синхронизировать ${#selected[@]} профилей с $OVPN_PROTO/$OVPN_PORT?" no || exit 0
+  prompt_yes_no "Синхронизировать transport у ${#selected[@]} профилей с $OVPN_PROTO? Внешние remote ports сохранятся." no || exit 0
   install -d -o root -g root -m 0700 /run/pve-openvpn
   exec 7>/run/pve-openvpn/config.lock; flock -x -w 30 7 || die "Конфигурация занята."
   acquire_pki_lock
@@ -155,7 +154,7 @@ if (( sync_only )); then
     die "Transport/port изменились другой операцией. Запусти команду заново."
   for f in "${selected[@]}"; do
     secure_profile "$f" || die "Профиль изменился после preflight: $f"
-    convert_profile "$f" "$cp" "$OVPN_PORT" || die "Не удалось обновить $(basename "$f")."
+    convert_profile "$f" "$cp" || die "Не удалось обновить $(basename "$f")."
     info "Обновлён $(basename "$f")"
   done
   exit 0
@@ -163,7 +162,8 @@ fi
 
 echo
 warn "Смена транспорта перезапустит OpenVPN и оборвёт текущие VPN-сессии."
-warn "Старые импортированные профили с другим proto/port после переключения подключаться не будут."
+warn "Старые импортированные профили с другим proto после переключения подключаться не будут."
+warn "Сохранённые remote ports клиентов не меняются: они могут отличаться от внутреннего OVPN_PORT из-за NAT/port-forward."
 echo "Сервер: $OVPN_PROTO/$OVPN_PORT -> $target/$port"
 echo "Профилей к обновлению: ${#selected[@]}"
 prompt_yes_no "Применить?" no || exit 0
@@ -215,7 +215,7 @@ if ! /usr/local/lib/pve-openvpn/pve-openvpn-render-server || ! systemctl restart
 fi
 
 for f in "${selected[@]}"; do
-  if ! convert_profile "$f" "$cp" "$port"; then
+  if ! convert_profile "$f" "$cp"; then
     rollback || die "CRITICAL: rollback не удался; OpenVPN остановлен."
     die "Не удалось конвертировать $(basename "$f"); сервер и профили восстановлены."
   fi
@@ -223,4 +223,4 @@ for f in "${selected[@]}"; do
 done
 trap - EXIT; rm -rf -- "$txn"
 info "Сервер переключён на $target/$port."
-echo "Обнови port-forward/PVE Firewall на ${target^^}/$port и переимпортируй изменённые .ovpn."
+echo "Внутренний listener теперь ${target^^}/$port. Обнови NAT/PVE Firewall при необходимости; внешние remote ports в .ovpn сохранены."

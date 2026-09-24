@@ -20,6 +20,15 @@ echo
 name="$(prompt_nonempty "Имя нового клиента (например laptop или phone): ")"
 validate_client_name "$name"
 
+CLIENT_REMOTE_PORT="$(prompt_with_default "Внешний порт сервера для этого клиента (port-forward/NAT)" "$OVPN_PORT")"
+[[ "$CLIENT_REMOTE_PORT" =~ ^[0-9]{1,5}$ ]] || die "Некорректный внешний порт: $CLIENT_REMOTE_PORT"
+CLIENT_REMOTE_PORT=$((10#$CLIENT_REMOTE_PORT))
+(( CLIENT_REMOTE_PORT >= 1 && CLIENT_REMOTE_PORT <= 65535 )) ||
+  die "Внешний порт должен быть 1..65535."
+
+echo "Клиент будет подключаться к: $OVPN_ENDPOINT:$CLIENT_REMOTE_PORT/$OVPN_PROTO"
+echo
+
 pre_status="$(pki_client_status "$name" 2>/dev/null || true)"
 case "$pre_status" in
   V)
@@ -152,7 +161,7 @@ CLIENT_PROTO="$(openvpn_client_proto "$OVPN_PROTO")" ||
 client
 dev tun
 proto $CLIENT_PROTO
-remote $OVPN_ENDPOINT $OVPN_PORT
+remote $OVPN_ENDPOINT $CLIENT_REMOTE_PORT
 resolv-retry infinite
 nobind
 persist-key

@@ -182,23 +182,30 @@ openssl crl -in /etc/openvpn/server/crl.pem -noout -lastupdate -nextupdate
 
 Внутренние systemd helpers находятся в `/usr/local/lib/pve-openvpn/` и не являются пользовательскими `ovpn-*` командами.
 
-## Nextcloud public-share upload
+## Nextcloud WebDAV upload
 
-`ovpn-upload-nextcloud` предназначен для интерактивной отправки выбранного файла в public-share WebDAV Nextcloud.
+`ovpn-upload-nextcloud` умеет два режима: public-share DAV и private DAV аккаунта.
 
 Безопасные свойства:
 
 - разрешён только HTTPS;
 - TLS verification curl не отключается;
-- share token и optional share password вводятся скрыто;
-- token/password не передаются в argv curl и не должны быть видны через обычный `ps`;
+- public token/share password/private app password вводятся скрыто;
+- secrets не передаются обычными аргументами `curl` и не должны быть видны через обычный `ps`;
 - чувствительные URL/auth данные живут только во временных `0600` curl-config файлах в `/run/pve-openvpn/`;
+- последние успешные настройки сохраняются в `/etc/openvpn/pve-nextcloud-upload.conf` с `root:root 0600`;
 - временные файлы удаляются через trap;
 - remote path не принимает `.`/`..` и URL-encode’ится по UTF-8 bytes;
 - HTTP success проверяется явно;
 - при выборе key/profile форматов показывается дополнительное предупреждение.
 
-Важно: public-share token фактически даёт права, настроенные владельцем share. Утёкший token нужно считать скомпрометированным и заменить/отозвать в Nextcloud. Для password-protected public share скрипт использует Basic auth с username `anonymous`, как предусмотрено Nextcloud public WebDAV.
+Public DAV использует `/public.php/dav/files/SHARE_TOKEN/...`. Для password-protected share применяется Basic Auth с username `anonymous`; для `PUT`/`MKCOL` отправляется `X-Requested-With: XMLHttpRequest`.
+
+Private DAV использует `/remote.php/dav/files/USERNAME/...` и Basic Auth `USERNAME + app password/token`. Основной пароль аккаунта использовать не рекомендуется; app password можно отдельно отозвать без смены основного пароля.
+
+Важно: `/etc/openvpn/pve-nextcloud-upload.conf` содержит credentials в base64-представлении. Base64 **не является шифрованием**; защита этого файла основана на root-only permissions. Компрометация root означает компрометацию сохранённого Nextcloud token/app-password.
+
+Public-share token фактически даёт права, настроенные владельцем share. Утёкший public token или private app password нужно считать скомпрометированным и заменить/отозвать в Nextcloud.
 
 Никогда не загружай CA private key или client profile в public share, если модель доступа к этому share не соответствует чувствительности файла.
 
@@ -393,7 +400,7 @@ CGNAT у провайдера может делать входящее подк�
 
 `ovpn-set-proto` меняет transport сервера транзакционно и может синхронизировать сохранённые клиентские `.ovpn`.
 
-Для TCP сервер использует `proto tcp-server`, а клиентский профиль — `proto tcp-client`. Для UDP обе стороны используют `proto udp`.
+Для TCP сервер использует `proto tcp-server`, а клиентский профиль — `proto tcp-client`. Для UDP обе стороны используют `proto udp`. Внешний `remote` port клиента может отличаться от внутреннего `OVPN_PORT` из-за NAT/port-forward; `ovpn-set-proto` сохраняет существующий client remote port и не подменяет его внутренним listener port.
 
 Перед изменением проверяется выбранный TCP/UDP listener. Конвертируются только root-owned `.ovpn` без group/other permissions, находящиеся в защищённом client directory и имеющие ожидаемую структуру этого сервера. Изменение `proto` и `remote ... PORT` выполняется через временный файл с mode `0600` и атомарный `mv`.
 

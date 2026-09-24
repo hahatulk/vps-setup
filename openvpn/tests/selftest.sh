@@ -57,12 +57,20 @@ ok "ovpn commands are zero-argument user interfaces"
 echo
 echo "== Nextcloud uploader safety =="
 uploader="bin/ovpn-upload-nextcloud"
-grep -Fq "X-Requested-With: XMLHttpRequest" "$uploader" || fail "Nextcloud uploader misses X-Requested-With"
-grep -Fq "X-NC-Nickname:" "$uploader" || fail "Nextcloud uploader misses X-NC-Nickname"
-grep -Fq "Public-share токен" "$uploader" || fail "Nextcloud uploader token prompt missing"
-grep -Fq "read -r -s" "$uploader" || fail "Nextcloud uploader secrets are not hidden"
-grep -Fq 'curl --config "$CURL_URL_CONFIG"' "$uploader" || fail "Nextcloud token URL is not passed through temp curl config"
+grep -Fq "X-Requested-With: XMLHttpRequest" "$uploader" || fail "Nextcloud public uploader misses X-Requested-With"
+grep -Fq "X-NC-Nickname:" "$uploader" || fail "Nextcloud public uploader misses X-NC-Nickname"
+grep -Fq "Public-share токен" "$uploader" || fail "Nextcloud public token prompt missing"
+grep -Fq "App password / token" "$uploader" || fail "Nextcloud private app-password prompt missing"
+grep -Fq '/public.php/dav/files/' "$uploader" || fail "Nextcloud public DAV endpoint missing"
+grep -Fq '/remote.php/dav/files/' "$uploader" || fail "Nextcloud private DAV endpoint missing"
+grep -Fq "read -r -s" "$uploader" || fail "Nextcloud secrets are not hidden"
+grep -Fq 'write_url_cfg "$URL_CFG"' "$uploader" || fail "Nextcloud DAV URL is not passed through temp curl config"
+grep -Fq 'write_auth_cfg "$AUTH_CFG"' "$uploader" || fail "Nextcloud credentials are not passed through temp curl config"
 grep -Fq "HTTP 200" README.md || fail "Nextcloud success codes are not documented"
+grep -Fq 'STATE_FILE="/etc/openvpn/pve-nextcloud-upload.conf"' "$uploader" || fail "Nextcloud persistent state file missing"
+grep -Fq 'DEFAULT_CLIENT_DIR="/root/openvpn-clients"' "$uploader" || fail "Nextcloud default client directory missing"
+grep -Fq "Использовать прошлые данные" "$uploader" || fail "Nextcloud saved-profile menu missing"
+grep -Fq "save_last_state" "$uploader" || fail "Nextcloud saved-state writer missing"
 
 urlencode_fn="$(
   awk '
@@ -76,7 +84,17 @@ eval "$urlencode_fn"
 encoded="$(urlencode_segment 'тест файл.txt')"
 [[ "$encoded" == '%D1%82%D0%B5%D1%81%D1%82%20%D1%84%D0%B0%D0%B9%D0%BB.txt' ]] ||
   fail "UTF-8 URL encoding: $encoded"
-ok "Nextcloud headers/secrets/UTF-8 encoding"
+ok "Nextcloud headers/secrets/state/default-files/UTF-8 encoding"
+
+echo
+echo "== Client external port =="
+add_client="bin/ovpn-add-client"
+grep -Fq "Внешний порт сервера для этого клиента" "$add_client" || fail "client external-port prompt missing"
+grep -Fq 'remote $OVPN_ENDPOINT $CLIENT_REMOTE_PORT' "$add_client" || fail "client profile does not use external remote port"
+if grep -Fq 'print "remote " e " " port' bin/ovpn-set-proto; then
+  fail "ovpn-set-proto still overwrites external client remote port"
+fi
+ok "client external port is separate from internal OVPN_PORT"
 
 echo
 echo "== Installer update-only ordering =="

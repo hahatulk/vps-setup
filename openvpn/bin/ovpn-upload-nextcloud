@@ -7,6 +7,7 @@ source /usr/local/lib/pve-openvpn/common.sh
 require_root
 require_cmd curl
 require_cmd stat
+require_cmd base64
 require_interactive_tty
 
 (($# == 0)) || die "ovpn-upload-nextcloud не принимает аргументы. Запусти просто: ovpn-upload-nextcloud"
@@ -14,360 +15,566 @@ require_interactive_tty
 normalize_base_url() {
   local value="$1"
   value="${value%/}"
-
-  [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] ||
-    die "Домен/URL не должен содержать переносы строк."
+  [[ "$value" != *$'\n'* && "$value" != *$'\r'* && "$value" != *[[:space:]]* ]] ||
+    die "Некорректный домен/base URL."
 
   case "$value" in
     https://*) ;;
-    http://*)
-      die "HTTP запрещён: токен public share нельзя отправлять без TLS. Используй https://"
-      ;;
-    *://*)
-      die "Поддерживается только HTTPS."
-      ;;
-    *)
-      value="https://$value"
-      ;;
+    http://*) die "HTTP запрещён. Используй HTTPS." ;;
+    *://*) die "Поддерживается только HTTPS." ;;
+    *) value="https://$value" ;;
   esac
 
-  [[ "$value" != *"@"* ]] || die "Не используй userinfo в URL."
-  [[ "$value" != *[[:space:]]* ]] || die "URL не должен содержать пробелы/whitespace."
-  [[ "$value" != *"?"* && "$value" != *"#"* ]] || die "URL не должен содержать query/fragment."
-  [[ "$value" != *'"'* && "$value" != *'\\'* ]] || die "URL содержит недопустимые символы."
+  [[ "$value" != *"@"* && "$value" != *"?"* && "$value" != *"#"* ]] ||
+    die "URL не должен содержать userinfo/query/fragment."
   printf '%s\n' "$value"
 }
 
-validate_token() {
-  local token="$1"
-  [[ "$token" =~ ^[A-Za-z0-9._~-]{4,160}$ ]] ||
-    die "Токен содержит недопустимые символы или имеет подозрительную длину."
+validate_public_token() {
+  [[ "$1" =~ ^[A-Za-z0-9._~-]{4,160}$ ]] ||
+    die "Некорректный public-share токен."
+}
+
+validate_username() {
+  local u="$1"
+  [[ -n "$u" && "$u" != "." && "$u" != ".." && "$u" != */* ]] ||
+    die "Некорректный логин Nextcloud."
+  [[ "$u" != *$'\n'* && "$u" != *$'\r'* ]] ||
+    die "Логин содержит CR/LF."
 }
 
 strip_outer_quotes() {
-  local value="$1"
-  if [[ ${#value} -ge 2 ]]; then
-    if [[ "${value:0:1}" == '"' && "${value: -1}" == '"' ]] ||
-       [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
-      value="${value:1:${#value}-2}"
+  local v="$1"
+  if [[ ${#v} -ge 2 ]]; then
+    if [[ "${v:0:1}" == '"' && "${v: -1}" == '"' ]] ||
+       [[ "${v:0:1}" == "'" && "${v: -1}" == "'" ]]; then
+      v="${v:1:${#v}-2}"
     fi
   fi
-  printf '%s\n' "$value"
+  printf '%s\n' "$v"
 }
 
 expand_local_path() {
-  local value="$1"
-  value="$(strip_outer_quotes "$value")"
-  case "$value" in
-    "~") value="$HOME" ;;
-    "~/"*) value="$HOME/${value#~/}" ;;
+  local v
+  v="$(strip_outer_quotes "$1")"
+  case "$v" in
+    "~") v="$HOME" ;;
+    "~/"*) v="$HOME/${v#~/}" ;;
   esac
-  printf '%s\n' "$value"
+  printf '%s\n' "$v"
 }
 
 urlencode_segment() {
-  local input="$1" output="" c hex i byte
+  local input="$1" out="" c hex i byte
   LC_ALL=C
   for ((i=0; i<${#input}; i++)); do
     c="${input:i:1}"
     case "$c" in
-      [a-zA-Z0-9.~_-])
-        output+="$c"
-        ;;
+      [a-zA-Z0-9.~_-]) out+="$c" ;;
       *)
         printf -v byte '%d' "'$c"
         (( byte < 0 )) && byte=$((byte + 256))
         printf -v hex '%%%02X' "$byte"
-        output+="$hex"
+        out+="$hex"
         ;;
     esac
   done
-  printf '%s\n' "$output"
+  printf '%s\n' "$out"
 }
 
-encode_remote_path() {
-  local path="$1" segment encoded="" first=1
-  local -a segments=()
+encode_path() {
+  local p="${1#/}" seg out="" first=1
+  local -a parts=()
+  p="${p%/}"
+  [[ -n "$p" ]] || { printf '\n'; return 0; }
 
-  path="${path#/}"
-  path="${path%/}"
-  [[ -n "$path" ]] || {
-    printf '\n'
-    return 0
-  }
-
-  IFS='/' read -r -a segments <<<"$path"
-  for segment in "${segments[@]}"; do
-    [[ -n "$segment" ]] || die "Удалённый путь не должен содержать //."
-    [[ "$segment" != "." && "$segment" != ".." ]] ||
-      die "Удалённый путь не должен содержать . или .."
-    [[ "$segment" != *$'\n'* && "$segment" != *$'\r'* ]] ||
-      die "Удалённый путь не должен содержать переносы строк."
-
-    if (( first )); then
-      first=0
-    else
-      encoded+="/"
-    fi
-    encoded+="$(urlencode_segment "$segment")"
+  IFS='/' read -r -a parts <<<"$p"
+  for seg in "${parts[@]}"; do
+    [[ -n "$seg" && "$seg" != "." && "$seg" != ".." ]] ||
+      die "Удалённый путь содержит недопустимый сегмент."
+    [[ "$seg" != *$'\n'* && "$seg" != *$'\r'* ]] ||
+      die "Удалённый путь содержит CR/LF."
+    (( first )) || out+="/"
+    first=0
+    out+="$(urlencode_segment "$seg")"
   done
-
-  printf '%s\n' "$encoded"
+  printf '%s\n' "$out"
 }
 
-masked_token() {
-  local token="$1" len="${#1}"
-  if (( len <= 8 )); then
-    printf '%s\n' "****"
+mask_secret() {
+  local v="$1" n="${#1}"
+  if (( n <= 8 )); then
+    printf '****\n'
   else
-    printf '%s…%s\n' "${token:0:4}" "${token: -4}"
+    printf '%s…%s\n' "${v:0:4}" "${v: -4}"
   fi
 }
 
-write_url_config() {
-  local cfg="$1" url="$2"
-  # URL уже собран из валидированного base URL + percent-encoded path.
-  # Токен хранится только во временном root-only curl config, а не в argv.
-  printf 'url = "%s"\n' "$url" > "$cfg"
-  chmod 0600 "$cfg"
+cfg_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
-curl_webdav() {
-  local method="$1" url="$2" body_file="$3" upload_file="${4:-}"
-  local rc code
+write_url_cfg() {
+  printf 'url = "%s"\n' "$(cfg_escape "$2")" > "$1"
+  chmod 0600 "$1"
+}
 
-  write_url_config "$CURL_URL_CONFIG" "$url"
+write_auth_cfg() {
+  printf 'user = "%s"\n' "$(cfg_escape "$2:$3")" > "$1"
+  chmod 0600 "$1"
+}
+
+
+STATE_FILE="/etc/openvpn/pve-nextcloud-upload.conf"
+STATE_MARKER="# Managed by pve-openvpn-kit Nextcloud uploader state v1"
+DEFAULT_CLIENT_DIR="/root/openvpn-clients"
+
+b64_encode() {
+  printf '%s' "$1" | base64 -w0
+}
+
+b64_decode() {
+  printf '%s' "$1" | base64 -d
+}
+
+state_file_is_secure() {
+  local mode
+  [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" ]] || return 1
+  [[ "$(stat -c '%u' "$STATE_FILE")" == "0" ]] || return 1
+  mode="$(stat -c '%a' "$STATE_FILE")"
+  [[ "$mode" == "600" ]]
+}
+
+load_last_state() {
+  local first key value decoded
+
+  [[ -e "$STATE_FILE" || -L "$STATE_FILE" ]] || return 1
+  state_file_is_secure ||
+    die "Небезопасный $STATE_FILE: нужен regular root-owned file mode 0600."
+
+  IFS= read -r first < "$STATE_FILE" || return 1
+  [[ "$first" == "$STATE_MARKER" ]] ||
+    die "Неизвестный формат $STATE_FILE."
+
+  LAST_DAV_MODE=""
+  LAST_BASE_URL=""
+  LAST_SHARE_TOKEN=""
+  LAST_SHARE_PASSWORD=""
+  LAST_NC_USER=""
+  LAST_NC_APP_PASSWORD=""
+  LAST_NICKNAME=""
+  LAST_REMOTE_FOLDER=""
+
+  while IFS='=' read -r key value; do
+    [[ -n "$key" && "$key" != \#* ]] || continue
+    case "$key" in
+      DAV_MODE)
+        LAST_DAV_MODE="$value"
+        ;;
+      BASE_URL_B64|SHARE_TOKEN_B64|SHARE_PASSWORD_B64|NC_USER_B64|NC_APP_PASSWORD_B64|NICKNAME_B64|REMOTE_FOLDER_B64)
+        decoded="$(b64_decode "$value" 2>/dev/null)" ||
+          die "Повреждён $STATE_FILE: $key не является base64."
+        case "$key" in
+          BASE_URL_B64) LAST_BASE_URL="$decoded" ;;
+          SHARE_TOKEN_B64) LAST_SHARE_TOKEN="$decoded" ;;
+          SHARE_PASSWORD_B64) LAST_SHARE_PASSWORD="$decoded" ;;
+          NC_USER_B64) LAST_NC_USER="$decoded" ;;
+          NC_APP_PASSWORD_B64) LAST_NC_APP_PASSWORD="$decoded" ;;
+          NICKNAME_B64) LAST_NICKNAME="$decoded" ;;
+          REMOTE_FOLDER_B64) LAST_REMOTE_FOLDER="$decoded" ;;
+        esac
+        ;;
+      *)
+        die "Неизвестное поле в $STATE_FILE: $key"
+        ;;
+    esac
+  done < <(tail -n +2 "$STATE_FILE")
+
+  [[ "$LAST_DAV_MODE" == "public" || "$LAST_DAV_MODE" == "private" ]] ||
+    die "Повреждён $STATE_FILE: DAV_MODE."
+  LAST_BASE_URL="$(normalize_base_url "$LAST_BASE_URL")"
+
+  if [[ "$LAST_DAV_MODE" == "public" ]]; then
+    validate_public_token "$LAST_SHARE_TOKEN"
+    [[ -n "$LAST_NICKNAME" ]] ||
+      die "Повреждён $STATE_FILE: nickname."
+  else
+    validate_username "$LAST_NC_USER"
+    [[ -n "$LAST_NC_APP_PASSWORD" ]] ||
+      die "Повреждён $STATE_FILE: app password."
+  fi
+
+  encode_path "$LAST_REMOTE_FOLDER" >/dev/null
+  return 0
+}
+
+save_last_state() {
+  local tmp
+  if [[ -e "$STATE_FILE" || -L "$STATE_FILE" ]]; then
+    state_file_is_secure || die "Не перезаписываю небезопасный $STATE_FILE."
+  fi
+
+  tmp="$(mktemp /etc/openvpn/.pve-nextcloud-upload.conf.XXXXXX)"
+  chmod 0600 "$tmp"
+  chown root:root "$tmp"
+
+  {
+    printf '%s\n' "$STATE_MARKER"
+    printf 'DAV_MODE=%s\n' "$DAV_MODE"
+    printf 'BASE_URL_B64=%s\n' "$(b64_encode "$BASE_URL")"
+    printf 'SHARE_TOKEN_B64=%s\n' "$(b64_encode "$SHARE_TOKEN")"
+    printf 'SHARE_PASSWORD_B64=%s\n' "$(b64_encode "$SHARE_PASSWORD")"
+    printf 'NC_USER_B64=%s\n' "$(b64_encode "$NC_USER")"
+    printf 'NC_APP_PASSWORD_B64=%s\n' "$(b64_encode "$NC_APP_PASSWORD")"
+    printf 'NICKNAME_B64=%s\n' "$(b64_encode "$NICKNAME")"
+    printf 'REMOTE_FOLDER_B64=%s\n' "$(b64_encode "$REMOTE_FOLDER")"
+  } > "$tmp"
+
+  if ! mv -fT -- "$tmp" "$STATE_FILE"; then
+    rm -f -- "$tmp"
+    die "Не удалось атомарно сохранить $STATE_FILE."
+  fi
+}
+
+choose_local_file() {
+  local f choice i
+  local -a candidates=()
+
+  if [[ -d "$DEFAULT_CLIENT_DIR" && ! -L "$DEFAULT_CLIENT_DIR" ]]; then
+    shopt -s nullglob
+    for f in "$DEFAULT_CLIENT_DIR"/*; do
+      [[ -f "$f" && ! -L "$f" ]] && candidates+=("$f")
+    done
+    shopt -u nullglob
+  fi
+
+  if ((${#candidates[@]} > 0)); then
+    echo "Файлы из $DEFAULT_CLIENT_DIR:" >&2
+    for i in "${!candidates[@]}"; do
+      printf '  %d) %s\n' "$((i + 1))" "$(basename -- "${candidates[$i]}")" >&2
+    done
+    echo "  m) Указать другой путь" >&2
+    echo "  0) Отмена" >&2
+
+    while true; do
+      IFS= read -r -p "Файл [1]: " choice || die "Ввод прерван."
+      choice="${choice:-1}"
+      case "$choice" in
+        0) return 1 ;;
+        m|M)
+          f="$(expand_local_path "$(prompt_nonempty "Локальный файл: ")")"
+          printf '%s\n' "$f"
+          return 0
+          ;;
+        *)
+          if [[ "$choice" =~ ^[0-9]+$ ]]; then
+            choice=$((10#$choice))
+            if (( choice >= 1 && choice <= ${#candidates[@]} )); then
+              printf '%s\n' "${candidates[$((choice - 1))]}"
+              return 0
+            fi
+          fi
+          warn "Выбери номер, m или 0."
+          ;;
+      esac
+    done
+  fi
+
+  f="$(expand_local_path "$(prompt_nonempty "Локальный файл: ")")"
+  printf '%s\n' "$f"
+}
+
+curl_dav() {
+  local method="$1" url="$2" body="$3" upload="${4:-}" code rc
+  local -a args=(
+    --config "$URL_CFG"
+    --silent --show-error
+    --connect-timeout 15
+    --request "$method"
+    --output "$body"
+    --write-out '%{http_code}'
+  )
+
+  write_url_cfg "$URL_CFG" "$url"
+
+  if [[ "$DAV_MODE" == "public" ]]; then
+    args+=(--header 'X-Requested-With: XMLHttpRequest')
+    args+=(--header "X-NC-Nickname: $NICKNAME")
+  fi
+
+  if [[ -n "$AUTH_CFG" ]]; then
+    args+=(--basic --config "$AUTH_CFG")
+  fi
+
+  if [[ -n "$upload" ]]; then
+    args+=(--max-time 1800 --upload-file "$upload")
+  else
+    args+=(--max-time 120)
+  fi
 
   set +e
-  if [[ -n "$upload_file" ]]; then
-    code="$(
-      curl --config "$CURL_URL_CONFIG" \
-        --silent --show-error \
-        --connect-timeout 15 \
-        --request "$method" \
-        --header 'X-Requested-With: XMLHttpRequest' \
-        --header "X-NC-Nickname: $NICKNAME" \
-        "${CURL_AUTH_ARGS[@]}" \
-        --upload-file "$upload_file" \
-        --output "$body_file" \
-        --write-out '%{http_code}'
-    )"
-    rc=$?
-  else
-    code="$(
-      curl --config "$CURL_URL_CONFIG" \
-        --silent --show-error \
-        --connect-timeout 15 \
-        --max-time 120 \
-        --request "$method" \
-        --header 'X-Requested-With: XMLHttpRequest' \
-        --header "X-NC-Nickname: $NICKNAME" \
-        "${CURL_AUTH_ARGS[@]}" \
-        --output "$body_file" \
-        --write-out '%{http_code}'
-    )"
-    rc=$?
-  fi
+  code="$(curl "${args[@]}")"
+  rc=$?
   set -e
 
   [[ "$code" =~ ^[0-9]{3}$ ]] || code="000"
-  CURL_LAST_CODE="$code"
-  CURL_LAST_RC="$rc"
+  CURL_CODE="$code"
+  CURL_RC="$rc"
   return "$rc"
 }
 
 show_error_body() {
-  local file="$1"
-  [[ -s "$file" ]] || return 0
-  echo
-  warn "Ответ Nextcloud:"
-  head -c 4096 "$file" | tr -d '\000' >&2 || true
+  [[ -s "$1" ]] || return 0
+  warn "Ответ Nextcloud (до 4096 байт):"
+  head -c 4096 "$1" | tr -d '\000' >&2 || true
   echo >&2
 }
 
-ensure_remote_folder() {
-  local raw_folder="$1" current="" segment enc_segment url code
-  local -a segments=()
+ensure_folder() {
+  local raw="${1#/}" current="" seg enc url
+  local -a parts=()
+  raw="${raw%/}"
+  [[ -n "$raw" ]] || return 0
 
-  raw_folder="${raw_folder#/}"
-  raw_folder="${raw_folder%/}"
-  [[ -n "$raw_folder" ]] || return 0
+  IFS='/' read -r -a parts <<<"$raw"
+  for seg in "${parts[@]}"; do
+    enc="$(urlencode_segment "$seg")"
+    [[ -n "$current" ]] && current+="/"
+    current+="$enc"
+    url="$DAV_BASE/$current"
+    : > "$RESPONSE"
 
-  IFS='/' read -r -a segments <<<"$raw_folder"
-  for segment in "${segments[@]}"; do
-    [[ -n "$segment" && "$segment" != "." && "$segment" != ".." ]] ||
-      die "Некорректный сегмент удалённой папки."
-    enc_segment="$(urlencode_segment "$segment")"
-    if [[ -n "$current" ]]; then
-      current+="/$enc_segment"
-    else
-      current="$enc_segment"
-    fi
-
-    url="$PUBLIC_BASE/$current"
-    : > "$RESPONSE_FILE"
-
-    if ! curl_webdav MKCOL "$url" "$RESPONSE_FILE"; then
-      warn "curl не смог выполнить MKCOL для папки '$segment'."
-      show_error_body "$RESPONSE_FILE"
+    if ! curl_dav MKCOL "$url" "$RESPONSE"; then
+      warn "MKCOL transport/TLS error (curl $CURL_RC)."
+      show_error_body "$RESPONSE"
       return 1
     fi
 
-    code="$CURL_LAST_CODE"
-    case "$code" in
-      201)
-        info "Создана папка: /${current}"
-        ;;
-      405)
-        # Для WebDAV это типичный ответ, когда коллекция уже существует.
-        ;;
-      2??)
-        ;;
+    case "$CURL_CODE" in
+      201) info "Создана папка: /$current" ;;
+      405|2??) ;;
       *)
-        warn "Не удалось создать/проверить папку /${current} (HTTP $code)."
-        show_error_body "$RESPONSE_FILE"
+        warn "MKCOL отклонён (HTTP $CURL_CODE): /$current"
+        show_error_body "$RESPONSE"
         return 1
         ;;
     esac
   done
 }
 
-echo "=== Загрузка файла в Nextcloud public share ==="
+
+echo "=== Nextcloud WebDAV upload ==="
 echo
 
-DOMAIN_RAW="$(prompt_nonempty "Домен Nextcloud или base URL (например nc.example.com): ")"
-BASE_URL="$(normalize_base_url "$DOMAIN_RAW")"
+SHARE_TOKEN=""
+SHARE_PASSWORD=""
+NC_USER=""
+NC_APP_PASSWORD=""
+NICKNAME=""
+REMOTE_FOLDER=""
+USE_SAVED=0
 
-while true; do
-  IFS= read -r -s -p "Public-share токен: " SHARE_TOKEN || die "Ввод прерван."
+if load_last_state; then
+  echo "Найдены последние настройки:"
+  echo "  Mode:      $LAST_DAV_MODE"
+  echo "  Nextcloud: $LAST_BASE_URL"
+  if [[ "$LAST_DAV_MODE" == "public" ]]; then
+    echo "  Token:     $(mask_secret "$LAST_SHARE_TOKEN")"
+    echo "  Nickname:  $LAST_NICKNAME"
+  else
+    echo "  User:      $LAST_NC_USER"
+    echo "  Credential: $(mask_secret "$LAST_NC_APP_PASSWORD")"
+  fi
+  echo "  Folder:    /${LAST_REMOTE_FOLDER}"
   echo
-  [[ -n "$SHARE_TOKEN" ]] || {
-    warn "Токен не может быть пустым."
-    continue
-  }
-  validate_token "$SHARE_TOKEN"
-  break
-done
+  echo "  1) Использовать прошлые данные"
+  echo "  2) Ввести новые"
+  echo "  0) Отмена"
 
-NICKNAME="$(prompt_with_default "X-NC-Nickname" "hahatulk")"
-[[ -n "$NICKNAME" && "$NICKNAME" != *$'\n'* && "$NICKNAME" != *$'\r'* ]] ||
-  die "Некорректный nickname."
-
-echo
-echo "Если public share защищён паролем, введи его сейчас."
-echo "Если пароля нет — просто Enter."
-IFS= read -r -s -p "Пароль public share (опционально): " SHARE_PASSWORD || die "Ввод прерван."
-echo
-[[ "$SHARE_PASSWORD" != *$'\r'* ]] || die "Пароль не должен содержать CR."
-
-LOCAL_INPUT="$(prompt_nonempty "Локальный файл: ")"
-LOCAL_FILE="$(expand_local_path "$LOCAL_INPUT")"
-[[ -f "$LOCAL_FILE" ]] || die "Файл не найден или это не regular file: $LOCAL_FILE"
-[[ -r "$LOCAL_FILE" ]] || die "Файл не читается: $LOCAL_FILE"
-
-REMOTE_FOLDER_RAW=""
-IFS= read -r -p "Удалённая папка внутри public share (Enter = корень): " REMOTE_FOLDER_RAW ||
-  die "Ввод прерван."
-REMOTE_FOLDER_RAW="${REMOTE_FOLDER_RAW#/}"
-REMOTE_FOLDER_RAW="${REMOTE_FOLDER_RAW%/}"
-REMOTE_FOLDER_ENC="$(encode_remote_path "$REMOTE_FOLDER_RAW")"
-
-LOCAL_BASENAME="$(basename -- "$LOCAL_FILE")"
-REMOTE_NAME="$(prompt_with_default "Имя файла в Nextcloud" "$LOCAL_BASENAME")"
-[[ -n "$REMOTE_NAME" && "$REMOTE_NAME" != "." && "$REMOTE_NAME" != ".." && "$REMOTE_NAME" != */* ]] ||
-  die "Имя удалённого файла должно быть одним именем без /."
-[[ "$REMOTE_NAME" != *$'\n'* && "$REMOTE_NAME" != *$'\r'* ]] ||
-  die "Имя файла не должно содержать переносы строк."
-REMOTE_NAME_ENC="$(urlencode_segment "$REMOTE_NAME")"
-
-install -d -o root -g root -m 0700 /run/pve-openvpn
-RESPONSE_FILE="$(mktemp /run/pve-openvpn/nextcloud-response.XXXXXX)"
-CURL_URL_CONFIG="$(mktemp /run/pve-openvpn/nextcloud-url.XXXXXX)"
-AUTH_CONFIG=""
-chmod 0600 "$RESPONSE_FILE" "$CURL_URL_CONFIG"
-cleanup_sensitive_tmp() {
-  rm -f -- "$RESPONSE_FILE" "$CURL_URL_CONFIG"
-  [[ -z "${AUTH_CONFIG:-}" ]] || rm -f -- "$AUTH_CONFIG"
-}
-trap cleanup_sensitive_tmp EXIT HUP INT TERM
-
-PUBLIC_BASE="$BASE_URL/public.php/dav/files/$SHARE_TOKEN"
-
-CURL_AUTH_ARGS=()
-if [[ -n "$SHARE_PASSWORD" ]]; then
-  # Пароль public share передаётся через временный curl config ниже, а не argv.
-  AUTH_CONFIG="$(mktemp /run/pve-openvpn/nextcloud-auth.XXXXXX)"
-  chmod 0600 "$AUTH_CONFIG"
-  printf 'user = "anonymous:%s"\n' "$(printf '%s' "$SHARE_PASSWORD" | sed 's/\\/\\\\/g; s/"/\\"/g')" > "$AUTH_CONFIG"
-  CURL_AUTH_ARGS=(--basic --config "$AUTH_CONFIG")
+  while true; do
+    IFS= read -r -p "Выбор [1]: " choice || die "Ввод прерван."
+    choice="${choice:-1}"
+    case "$choice" in
+      1) USE_SAVED=1; break ;;
+      2) break ;;
+      0) info "Отменено."; exit 0 ;;
+      *) warn "Выбери 0, 1 или 2." ;;
+    esac
+  done
 fi
 
-FILE_SIZE="$(stat -c '%s' "$LOCAL_FILE")"
-echo
-echo "Проверка перед загрузкой:"
-echo "  Nextcloud: $BASE_URL"
-echo "  Token:     $(masked_token "$SHARE_TOKEN")"
-echo "  Nickname:  $NICKNAME"
-echo "  Файл:      $LOCAL_FILE"
-echo "  Размер:    $FILE_SIZE bytes"
-echo "  Папка:     /${REMOTE_FOLDER_RAW:-}"
-echo "  Имя:       $REMOTE_NAME"
-
-case "$LOCAL_FILE" in
-  *.ovpn|*.key|*.pem|*.p12|*.pfx|*.pkcs12)
-    echo
-    warn "Выбран файл, который может содержать приватные ключи/секреты."
-    ;;
-esac
-
-echo
-prompt_yes_no "Продолжить загрузку?" no || {
-  info "Отменено."
-  exit 0
-}
-
-if [[ -n "$REMOTE_FOLDER_RAW" ]]; then
+if (( USE_SAVED )); then
+  DAV_MODE="$LAST_DAV_MODE"
+  BASE_URL="$LAST_BASE_URL"
+  SHARE_TOKEN="$LAST_SHARE_TOKEN"
+  SHARE_PASSWORD="$LAST_SHARE_PASSWORD"
+  NC_USER="$LAST_NC_USER"
+  NC_APP_PASSWORD="$LAST_NC_APP_PASSWORD"
+  NICKNAME="$LAST_NICKNAME"
+  REMOTE_FOLDER="$LAST_REMOTE_FOLDER"
+else
   echo
-  if prompt_yes_no "Попробовать создать отсутствующие папки через WebDAV MKCOL?" yes; then
-    ensure_remote_folder "$REMOTE_FOLDER_RAW" ||
-      die "Не удалось подготовить удалённую папку."
+  echo "  1) Public share DAV"
+  echo "  2) Private DAV"
+  echo "  0) Отмена"
+  echo
+
+  while true; do
+    IFS= read -r -p "Тип доступа: " choice || die "Ввод прерван."
+    case "$choice" in
+      1) DAV_MODE="public"; break ;;
+      2) DAV_MODE="private"; break ;;
+      0) info "Отменено."; exit 0 ;;
+      *) warn "Выбери 0, 1 или 2." ;;
+    esac
+  done
+
+  BASE_URL="$(normalize_base_url "$(prompt_nonempty "Домен Nextcloud/base URL: ")")"
+
+  if [[ "$DAV_MODE" == "public" ]]; then
+    while true; do
+      IFS= read -r -s -p "Public-share токен: " SHARE_TOKEN || die "Ввод прерван."
+      echo
+      [[ -n "$SHARE_TOKEN" ]] || { warn "Токен пуст."; continue; }
+      validate_public_token "$SHARE_TOKEN"
+      break
+    done
+
+    NICKNAME="$(prompt_with_default "X-NC-Nickname" "hahatulk")"
+    [[ "$NICKNAME" != *$'\n'* && "$NICKNAME" != *$'\r'* ]] || die "Некорректный nickname."
+
+    IFS= read -r -s -p "Пароль public share (Enter = нет): " SHARE_PASSWORD || die "Ввод прерван."
+    echo
+    [[ "$SHARE_PASSWORD" != *$'\n'* && "$SHARE_PASSWORD" != *$'\r'* ]] ||
+      die "Пароль содержит CR/LF."
+  else
+    NC_USER="$(prompt_nonempty "Логин Nextcloud: ")"
+    validate_username "$NC_USER"
+
+    while true; do
+      IFS= read -r -s -p "App password / token: " NC_APP_PASSWORD || die "Ввод прерван."
+      echo
+      [[ -n "$NC_APP_PASSWORD" ]] || { warn "App password/token пуст."; continue; }
+      [[ "$NC_APP_PASSWORD" != *$'\n'* && "$NC_APP_PASSWORD" != *$'\r'* ]] ||
+        die "Credential содержит CR/LF."
+      break
+    done
   fi
 fi
 
-if [[ -n "$REMOTE_FOLDER_ENC" ]]; then
-  UPLOAD_URL="$PUBLIC_BASE/$REMOTE_FOLDER_ENC/$REMOTE_NAME_ENC"
+if [[ "$DAV_MODE" == "public" ]]; then
+  DAV_BASE="$BASE_URL/public.php/dav/files/$SHARE_TOKEN"
 else
-  UPLOAD_URL="$PUBLIC_BASE/$REMOTE_NAME_ENC"
+  DAV_BASE="$BASE_URL/remote.php/dav/files/$(urlencode_segment "$NC_USER")"
 fi
 
-: > "$RESPONSE_FILE"
+if ! LOCAL_FILE="$(choose_local_file)"; then
+  info "Отменено."
+  exit 0
+fi
+[[ -f "$LOCAL_FILE" ]] || die "Не regular file: $LOCAL_FILE"
+[[ -r "$LOCAL_FILE" ]] || die "Файл не читается: $LOCAL_FILE"
+
+if (( USE_SAVED )); then
+  if [[ -n "$REMOTE_FOLDER" ]]; then
+    REMOTE_FOLDER="$(prompt_with_default "Удалённая папка" "$REMOTE_FOLDER")"
+  else
+    IFS= read -r -p "Удалённая папка (Enter = корень): " REMOTE_FOLDER || die "Ввод прерван."
+  fi
+else
+  IFS= read -r -p "Удалённая папка (Enter = корень): " REMOTE_FOLDER || die "Ввод прерван."
+fi
+
+REMOTE_FOLDER="${REMOTE_FOLDER#/}"
+REMOTE_FOLDER="${REMOTE_FOLDER%/}"
+REMOTE_FOLDER_ENC="$(encode_path "$REMOTE_FOLDER")"
+
+REMOTE_NAME="$(prompt_with_default "Имя файла в Nextcloud" "$(basename -- "$LOCAL_FILE")")"
+[[ -n "$REMOTE_NAME" && "$REMOTE_NAME" != "." && "$REMOTE_NAME" != ".." && "$REMOTE_NAME" != */* ]] ||
+  die "Некорректное имя файла."
+[[ "$REMOTE_NAME" != *$'\n'* && "$REMOTE_NAME" != *$'\r'* ]] || die "Имя файла содержит CR/LF."
+REMOTE_NAME_ENC="$(urlencode_segment "$REMOTE_NAME")"
+
+if [[ -e /run/pve-openvpn || -L /run/pve-openvpn ]]; then
+  [[ -d /run/pve-openvpn && ! -L /run/pve-openvpn ]] ||
+    die "Небезопасный /run/pve-openvpn"
+fi
+install -d -o root -g root -m 0700 /run/pve-openvpn
+
+RESPONSE="$(mktemp /run/pve-openvpn/nc-response.XXXXXX)"
+URL_CFG="$(mktemp /run/pve-openvpn/nc-url.XXXXXX)"
+AUTH_CFG=""
+chmod 0600 "$RESPONSE" "$URL_CFG"
+
+cleanup() {
+  rm -f -- "$RESPONSE" "$URL_CFG"
+  [[ -z "${AUTH_CFG:-}" ]] || rm -f -- "$AUTH_CFG"
+}
+trap cleanup EXIT HUP INT TERM
+
+if [[ "$DAV_MODE" == "public" ]]; then
+  if [[ -n "$SHARE_PASSWORD" ]]; then
+    AUTH_CFG="$(mktemp /run/pve-openvpn/nc-auth.XXXXXX)"
+    write_auth_cfg "$AUTH_CFG" "anonymous" "$SHARE_PASSWORD"
+  fi
+else
+  AUTH_CFG="$(mktemp /run/pve-openvpn/nc-auth.XXXXXX)"
+  write_auth_cfg "$AUTH_CFG" "$NC_USER" "$NC_APP_PASSWORD"
+fi
+
 echo
-info "Загружаю файл..."
-
-if curl_webdav PUT "$UPLOAD_URL" "$RESPONSE_FILE" "$LOCAL_FILE"; then
-  :
+echo "Проверка:"
+echo "  Mode:       $DAV_MODE"
+echo "  Nextcloud:  $BASE_URL"
+if [[ "$DAV_MODE" == "public" ]]; then
+  echo "  Token:      $(mask_secret "$SHARE_TOKEN")"
+  echo "  Nickname:   $NICKNAME"
 else
-  rc="$CURL_LAST_RC"
-  show_error_body "$RESPONSE_FILE"
-  die "curl завершился с ошибкой transport/TLS (код $rc)."
+  echo "  User:       $NC_USER"
+  echo "  Credential: $(mask_secret "$NC_APP_PASSWORD")"
 fi
+echo "  Local:      $LOCAL_FILE"
+echo "  Size:       $(stat -c '%s' "$LOCAL_FILE") bytes"
+echo "  Folder:     /$REMOTE_FOLDER"
+echo "  Remote:     $REMOTE_NAME"
 
-case "$CURL_LAST_CODE" in
-  200|201|204)
-    info "Загрузка успешна (HTTP $CURL_LAST_CODE)."
-    ;;
-  *)
-    show_error_body "$RESPONSE_FILE"
-    die "Nextcloud отклонил загрузку (HTTP $CURL_LAST_CODE)."
+case "$LOCAL_FILE" in
+  *.ovpn|*.key|*.pem|*.p12|*.pfx|*.pkcs12)
+    warn "Файл может содержать приватные ключи/секреты."
     ;;
 esac
 
-echo
-echo "Удалённый путь:"
-if [[ -n "$REMOTE_FOLDER_RAW" ]]; then
-  echo "  /${REMOTE_FOLDER_RAW}/$REMOTE_NAME"
-else
-  echo "  /$REMOTE_NAME"
+prompt_yes_no "Загрузить?" no || { info "Отменено."; exit 0; }
+
+if [[ -n "$REMOTE_FOLDER" ]] &&
+   prompt_yes_no "Создать отсутствующие папки через MKCOL?" yes; then
+  ensure_folder "$REMOTE_FOLDER" || die "Не удалось подготовить удалённую папку."
 fi
 
-# Не печатаем URL с public-share токеном.
+if [[ -n "$REMOTE_FOLDER_ENC" ]]; then
+  UPLOAD_URL="$DAV_BASE/$REMOTE_FOLDER_ENC/$REMOTE_NAME_ENC"
+else
+  UPLOAD_URL="$DAV_BASE/$REMOTE_NAME_ENC"
+fi
+
+: > "$RESPONSE"
+info "Загружаю..."
+
+if ! curl_dav PUT "$UPLOAD_URL" "$RESPONSE" "$LOCAL_FILE"; then
+  show_error_body "$RESPONSE"
+  die "curl transport/TLS error (код $CURL_RC)."
+fi
+
+case "$CURL_CODE" in
+  200|201|204)
+    info "Загрузка успешна (HTTP $CURL_CODE)."
+    ;;
+  *)
+    show_error_body "$RESPONSE"
+    die "Nextcloud отклонил PUT (HTTP $CURL_CODE)."
+    ;;
+esac
+
+save_last_state
+info "Последние настройки сохранены в $STATE_FILE (root:root 0600)."
+echo "Удалённый путь: /${REMOTE_FOLDER:+$REMOTE_FOLDER/}$REMOTE_NAME"

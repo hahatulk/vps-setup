@@ -145,6 +145,15 @@ for command_path in \
   fi
 done
 
+nextcloud_state=/etc/openvpn/pve-nextcloud-upload.conf
+if [[ -f "$nextcloud_state" && ! -L "$nextcloud_state" ]] &&
+   [[ "$(stat -c '%u:%a' "$nextcloud_state" 2>/dev/null || true)" == "0:600" ]] &&
+   grep -Fqx '# Managed by pve-openvpn-kit Nextcloud uploader state v1' "$nextcloud_state"; then
+  rm -f -- "$nextcloud_state"
+elif [[ -e "$nextcloud_state" || -L "$nextcloud_state" ]]; then
+  warn "Не удаляю изменённый/небезопасный $nextcloud_state."
+fi
+
 for legacy in /usr/local/sbin/ovpn-fw /usr/local/sbin/ovpn-render-server; do
   if [[ -f "$legacy" && ! -L "$legacy" ]] &&
      grep -Fq '/usr/local/lib/pve-openvpn/common.sh' "$legacy"; then
