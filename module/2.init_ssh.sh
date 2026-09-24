@@ -49,7 +49,6 @@ for expected in \
   'port 2001' \
   'passwordauthentication no' \
   'kbdinteractiveauthentication no' \
-  'permitrootlogin prohibit-password' \
   'usepam yes'; do
   if ! grep -Fqx "$expected" <<< "$sshd_effective"; then
     if [ "$had_cloud" -eq 1 ]; then cp -p "$cloud_backup" "$cloud_config"; fi
@@ -58,6 +57,16 @@ for expected in \
     exit 1
   fi
 done
+
+# OpenSSH may report this setting as either "prohibit-password" or the
+# legacy synonym "without-password". They are equivalent.
+if ! grep -Eq '^permitrootlogin (prohibit-password|without-password)$' <<< "$sshd_effective"; then
+  if [ "$had_cloud" -eq 1 ]; then cp -p "$cloud_backup" "$cloud_config"; fi
+  if [ "$had_target" -eq 1 ]; then cp -p "$backup" "$target"; else rm -f "$target"; fi
+  echo "ERROR: effective SSH setting 'permitrootlogin' is not prohibit-password/without-password; previous configuration restored." >&2
+  exit 1
+fi
+
 if awk '$1 == "pubkeyacceptedalgorithms" { print $2 }' <<< "$sshd_effective" | tr ',' '\n' | grep -Fxq ssh-rsa; then
   if [ "$had_cloud" -eq 1 ]; then cp -p "$cloud_backup" "$cloud_config"; fi
   if [ "$had_target" -eq 1 ]; then cp -p "$backup" "$target"; else rm -f "$target"; fi
