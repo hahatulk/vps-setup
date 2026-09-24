@@ -27,6 +27,7 @@ openvpn/
 │   ├── ovpn-list-clients
 │   ├── ovpn-restart
 │   ├── ovpn-revoke-client
+│   ├── ovpn-routes
 │   ├── ovpn-scrub-client-secret
 │   ├── ovpn-set-mode
 │   ├── ovpn-set-proto
@@ -186,6 +187,7 @@ sudo ovpn
 8) Перезапустить OpenVPN
 9) Отправить файл в Nextcloud
 10) Показать последние логи OpenVPN
+11) Управление server push routes
 0) Выход
 ```
 
@@ -284,6 +286,64 @@ pki/tls-crypt-v2-clients/<client>.key
 Это **не revoke**. Уже импортированный клиент продолжит работать.
 
 После scrub повторно экспортировать тот же профиль нельзя.
+
+### Добавить/удалить server-side push routes
+
+```bash
+sudo ovpn-routes
+```
+
+Или пункт `11` в `sudo ovpn`.
+
+Команда показывает текущий список сетей и предлагает:
+
+```text
+1) Добавить push route
+2) Удалить push route
+0) Назад
+```
+
+Маршрут вводится в CIDR, например:
+
+```text
+10.0.209.0/24
+```
+
+В server config он автоматически превращается в:
+
+```text
+push "route 10.0.209.0 255.255.255.0"
+```
+
+Список хранится в `OVPN_LANS` внутри `/etc/openvpn/pve-openvpn.conf`. Поэтому добавление/удаление синхронно меняет три вещи:
+
+```text
+OpenVPN push route
+FORWARD rules для VPN -> выбранная сеть
+MASQUERADE/NAT для VPN -> выбранная сеть
+```
+
+Например для твоей сети Proxmox/LAN:
+
+```text
+VPN:      10.8.0.0/24
+Proxmox:  10.0.209.11
+LAN:      10.0.209.0/24
+```
+
+добавь:
+
+```text
+10.0.209.0/24
+```
+
+После применения OpenVPN перезапускается, поэтому клиенты переподключаются и получают новый route.
+
+Удаление работает по номеру из списка и убирает одновременно push/FORWARD/NAT. Изменение делается транзакционно с backup/rollback.
+
+Важно: доступ к **самому Proxmox** `10.0.209.11` проходит через `INPUT`, а не `FORWARD`. `ovpn-routes` не открывает TCP/8006, TCP/22 или другие host-порты автоматически. Если включён PVE Firewall, разрешай их отдельно только от `10.8.0.0/24`.
+
+`0.0.0.0/0` через `ovpn-routes` запрещён; для полного default route используй `ovpn-set-mode -> full`.
 
 ### Переключить split/full
 

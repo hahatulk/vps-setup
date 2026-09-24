@@ -45,7 +45,7 @@ echo
 echo "== Interactive ovpn policy =="
 for f in bin/ovpn bin/ovpn-add-client bin/ovpn-list-clients bin/ovpn-restart \
          bin/ovpn-revoke-client bin/ovpn-scrub-client-secret bin/ovpn-set-mode \
-         bin/ovpn-set-proto bin/ovpn-upload-nextcloud bin/ovpn-status; do
+         bin/ovpn-set-proto bin/ovpn-upload-nextcloud bin/ovpn-routes bin/ovpn-status; do
   [[ -f "$f" ]] || fail "missing $f"
   grep -Fq '($# == 0)' "$f" || fail "$f does not explicitly reject arguments"
   grep -Fq 'require_interactive_tty' "$f" || fail "$f is not explicitly interactive/TTY-only"
@@ -95,6 +95,18 @@ if grep -Fq 'print "remote " e " " port' bin/ovpn-set-proto; then
   fail "ovpn-set-proto still overwrites external client remote port"
 fi
 ok "client external port is separate from internal OVPN_PORT"
+
+echo
+echo "== Server push routes manager =="
+routes="bin/ovpn-routes"
+grep -Fq "Добавить push route" "$routes" || fail "push-route add menu missing"
+grep -Fq "Удалить push route" "$routes" || fail "push-route remove menu missing"
+grep -Fq "OVPN_LANS=(" "$routes" || fail "push-route manager does not persist OVPN_LANS"
+grep -Fq "pve-openvpn-render-server" "$routes" || fail "push-route manager does not render server config"
+grep -Fq "pve-openvpn-fw.service" "$routes" || fail "push-route manager does not reload firewall"
+grep -Fq "0.0.0.0/0 здесь запрещён" "$routes" || fail "push-route manager should reject default route"
+grep -Fq "INPUT к самому Proxmox автоматически не открывается" "$routes" || fail "push-route INPUT warning missing"
+ok "server push routes add/remove transaction"
 
 echo
 echo "== Installer update-only ordering =="

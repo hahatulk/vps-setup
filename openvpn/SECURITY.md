@@ -284,6 +284,22 @@ git diff --cached --name-only
 
 ---
 
+## Server-side push routes
+
+`ovpn-routes` управляет только CIDR-маршрутами из `OVPN_LANS`. Произвольные строки `push` не принимаются: это специально ограничивает возможность через меню внедрить небезопасные OpenVPN directives.
+
+При добавлении сети одновременно обновляются server-side `push "route ..."`, разрешённый `FORWARD` и MASQUERADE/NAT. При удалении эти три элемента убираются вместе. Изменение выполняется под config lock с backup и rollback при ошибке render/firewall/OpenVPN restart.
+
+Запрещаются:
+
+- `0.0.0.0/0` — для default route используется контролируемый full mode;
+- сети, пересекающиеся с VPN pool;
+- дублирующиеся или перекрывающиеся `OVPN_LANS`.
+
+`ovpn-routes` не открывает `INPUT` к самому Proxmox. Доступ к `10.0.209.11:8006`, SSH и другим host services должен разрешаться отдельными правилами PVE Firewall только для нужных VPN sources.
+
+---
+
 ## Network isolation
 
 Split mode разрешает VPN forwarding только к сетям, перечисленным через:

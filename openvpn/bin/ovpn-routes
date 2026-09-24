@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# shellcheck disable=SC1091
+source /usr/local/lib/pve-openvpn/common.sh
+
+require_root
+require_cmd flock
+require_cmd systemctl
+require_cmd sha256sum
+load_config
+require_interactive_tty
+
+(($# == 0)) || die "ovpn-routes не принимает аргументы. Запусти просто: ovpn-routes"
+
+lan_signature() {
+  local item
+  for item in "$@"; do
+    printf '%s\0' "$item"
+  done | sha256sum | awk '{print $1}'
+}
+
+show_routes() {
+  local i
+  echo "Текущие server-side push routes:"
+  if ((${#OVPN_LANS[@]} == 0)); then
+    echo "  (нет)"
+    return
+  fi
+  for i in "${!OVPN_LANS[@]}"; do
+    printf '  %d) %s\n' "$((i + 1))" "${OVPN_LANS[$i]}"
+  done
+}
+
+write_lans_candidate() {
+  local dst="$1" line="OVPN_LANS=(" escaped item found=0 raw
+
+  for item in "${NEW_LANS[@]}"; do
+    printf -v escaped '%q' "$item"
+    line+=" $escaped"
+  done
+  line+=" )"
+
+  : > "$dst"
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    case "$raw" in
+      OVPN_LANS=*)
+        printf '%s\n' "$line" >> "$dst"
+        ((found += 1))
+        ;;
+      *)
+        printf '%s\n' "$raw" >> "$dst"
+        ;;
+    esac
+  done < "$CONFIG_FILE"
+
+  [[ "$found" == "1" ]] ||
+    die "Неожиданный формат $CONFIG_FILE: нужен ровно один OVPN_LANS=(...)."
+}
+
+apply_routes() {
+  local expected_signature="$1" backup candidate failed=0
+
+  if [[ -e /run/pve-openvpn || -L /run/pve-openvpn ]]; then
+    [[ -d /run/pve-openvpn && ! -L /run/pve-openvpn ]] ||
+      die "Небезопасный runtime directory: /run/pve-openvpn"
+  fi
+  install -d -o root -g root -m 0700 /run/pve-openvpn
+
+  exec 7>/run/pve-openvpn/config.lock
+  flock -x -w 30 7 || die "Конфигурация занята другой операцией. Повтори позже."
+
+  load_config
+  [[ "$(lan_signature "${OVPN_LANS[@]}")" == "$expected_signature" ]] ||
+    die "Список маршрутов изменился другой операцией. Запусти ovpn-routes заново."
+
+  backup="$(mktemp /run/pve-openvpn/routes.backup.XXXXXX)"
+  candidate="$(mktemp /run/pve-openvpn/routes.candidate.XXXXXX)"
+  chmod 0600 "$backup" "$candidate"
+  trap 'rm -f -- "$backup" "$candidate"' EXIT
+
+  cp --preserve=mode,ownership,timestamps "$CONFIG_FILE" "$backup"
+  write_lans_candidate "$candidate"
+  install -o root -g root -m 0600 "$candidate" "$CONFIG_FILE"
+
+  rollback() {
+    warn "Откатываю изменение push routes..."
+    failed=0
+    install -o root -g root -m 0600 "$backup" "$CONFIG_FILE" || failed=1
+    /usr/local/lib/pve-openvpn/pve-openvpn-render-server >/dev/null 2>&1 || failed=1
+    systemctl restart pve-openvpn-fw.service >/dev/null 2>&1 || failed=1
+    systemctl restart "openvpn-server@${OVPN_SERVER_NAME}.service" >/dev/null 2>&1 || failed=1
+
+    if (( failed )); then
+      warn "Rollback применён не полностью; останавливаю OpenVPN fail-closed."
+      systemctl stop "openvpn-server@${OVPN_SERVER_NAME}.service" >/dev/null 2>&1 || true
+      return 1
+    fi
+  }
+
+  if ! /usr/local/lib/pve-openvpn/pve-openvpn-render-server; then
+    rollback || die "CRITICAL: rollback не завершён; OpenVPN остановлен."
+    die "Не удалось сгенерировать server config. Старые routes восстановлены."
+  fi
+
+  if ! systemctl restart pve-openvpn-fw.service; then
+    rollback || die "CRITICAL: rollback не завершён; OpenVPN остановлен."
+    die "Не удалось применить firewall/NAT. Старые routes восстановлены."
+  fi
+
+  if ! systemctl restart "openvpn-server@${OVPN_SERVER_NAME}.service"; then
+    rollback || die "CRITICAL: rollback не завершён; OpenVPN остановлен."
+    die "OpenVPN не запустился. Старые routes восстановлены."
+  fi
+
+  trap - EXIT
+  rm -f -- "$backup" "$candidate"
+}
+
+while true; do
+  clear 2>/dev/null || true
+  load_config
+  INITIAL_SIGNATURE="$(lan_signature "${OVPN_LANS[@]}")"
+
+  echo "=== Server-side OpenVPN push routes ==="
+  echo
+  show_routes
+  echo
+  echo "  1) Добавить push route"
+  echo "  2) Удалить push route"
+  echo "  0) Назад"
+  echo
+
+  IFS= read -r -p "Выбор: " choice || exit 0
+
+  case "$choice" in
+    1)
+      echo
+      route="$(prompt_nonempty "CIDR сети (например 10.0.209.0/24): ")"
+      route="$(normalize_cidr "$route")" || die "Некорректный CIDR."
+
+      [[ "$route" != "0.0.0.0/0" ]] ||
+        die "0.0.0.0/0 здесь запрещён. Для default route используй ovpn-set-mode -> full."
+
+      cidr_overlap "$OVPN_VPN_CIDR" "$route" &&
+        die "Маршрут $route пересекается с VPN subnet $OVPN_VPN_CIDR."
+
+      duplicate=0
+      overlap=""
+      for item in "${OVPN_LANS[@]}"; do
+        normalized_item="$(normalize_cidr "$item")"
+        [[ "$normalized_item" == "$route" ]] && duplicate=1
+        if [[ "$normalized_item" != "$route" ]] && cidr_overlap "$normalized_item" "$route"; then
+          overlap="$normalized_item"
+        fi
+      done
+      (( ! duplicate )) || die "Маршрут $route уже существует."
+      [[ -z "$overlap" ]] || die "Маршрут $route пересекается с уже разрешённой сетью $overlap. Используй один однозначный CIDR."
+
+      NEW_LANS=("${OVPN_LANS[@]}" "$route")
+
+      echo
+      echo "Будет добавлено:"
+      echo "  push route: $route"
+      echo "  FORWARD:    VPN -> $route (для транзитных хостов)"
+      echo "  NAT:        $OVPN_VPN_CIDR -> $route"
+      echo "  INPUT к самому Proxmox автоматически не открывается"
+      echo
+      warn "OpenVPN будет перезапущен; подключённые клиенты переподключатся."
+      prompt_yes_no "Добавить маршрут?" yes || {
+        info "Отменено."
+        continue
+      }
+
+      apply_routes "$INITIAL_SIGNATURE"
+      info "Маршрут $route добавлен."
+      echo "Клиенты после переподключения получат новый push route."
+      ;;
+    2)
+      if ((${#OVPN_LANS[@]} == 0)); then
+        warn "Удалять нечего."
+        sleep 1
+        continue
+      fi
+
+      echo
+      while true; do
+        IFS= read -r -p "Номер маршрута для удаления (0 = отмена): " idx || exit 0
+        [[ "$idx" =~ ^[0-9]+$ ]] || {
+          warn "Введи номер."
+          continue
+        }
+        idx=$((10#$idx))
+        (( idx == 0 )) && break
+        if (( idx >= 1 && idx <= ${#OVPN_LANS[@]} )); then
+          break
+        fi
+        warn "Нет такого маршрута."
+      done
+      (( idx != 0 )) || continue
+
+      remove_index=$((idx - 1))
+      route="${OVPN_LANS[$remove_index]}"
+      NEW_LANS=()
+      for i in "${!OVPN_LANS[@]}"; do
+        (( i == remove_index )) || NEW_LANS+=("${OVPN_LANS[$i]}")
+      done
+
+      echo
+      warn "Будет удалён доступ VPN-клиентов к $route:"
+      echo "  server push route"
+      echo "  FORWARD allow для транзитных хостов"
+      echo "  MASQUERADE/NAT rule"
+      echo "  INPUT к самому Proxmox этим не управляется"
+      warn "Если ты сейчас управляешь сервером через этот маршрут, соединение может оборваться."
+      warn "OpenVPN будет перезапущен; подключённые клиенты переподключатся."
+      prompt_yes_no "Удалить маршрут $route?" no || {
+        info "Отменено."
+        continue
+      }
+
+      apply_routes "$INITIAL_SIGNATURE"
+      info "Маршрут $route удалён."
+      ;;
+    0)
+      exit 0
+      ;;
+    *)
+      warn "Нет такого пункта."
+      sleep 1
+      ;;
+  esac
+
+  echo
+  IFS= read -r -p "Нажми Enter, чтобы продолжить..." _ || true
+done

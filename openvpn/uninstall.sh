@@ -136,7 +136,8 @@ for command_path in \
   /usr/local/sbin/ovpn-set-proto \
   /usr/local/sbin/ovpn-upload-nextcloud \
   /usr/local/sbin/ovpn-scrub-client-secret \
-  /usr/local/sbin/ovpn-restart; do
+  /usr/local/sbin/ovpn-restart \
+  /usr/local/sbin/ovpn-routes; do
   if [[ -f "$command_path" && ! -L "$command_path" ]] &&
      grep -Fq '/usr/local/lib/pve-openvpn/common.sh' "$command_path"; then
     rm -f -- "$command_path"
