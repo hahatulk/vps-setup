@@ -42,9 +42,6 @@ install -d -m 0700 -o "$username" -g "$primary_group" "$home_dir/.ssh"
 touch "$home_dir/.ssh/authorized_keys"
 chmod 600 "$home_dir/.ssh/authorized_keys"
 chown "$username:$primary_group" "$home_dir/.ssh/authorized_keys"
-mkdir -p /opt/docker
-mkdir -p /opt/docker/"$project"
-mkdir -p /opt/docker/ssh
 mkdir -p /opt/docker/ssh/"$project"
 
 key_path="/opt/docker/ssh/$project/id_rsa"
@@ -63,15 +60,8 @@ if ! grep -qxF "$public_key" "$home_dir/.ssh/authorized_keys"; then
 	printf '%s\n' "$public_key" >> "$home_dir/.ssh/authorized_keys"
 fi
 
-docker_compose_path="/opt/docker/$project/docker-compose.yml"
-
-if [ ! -f "$docker_compose_path" ]; then
-	touch "$docker_compose_path"
-fi
-
 chmod 400 "$key_path"
 chown -R "$username:$primary_group" /opt/docker/ssh/"$project"
-chown -R "$username:$primary_group" /opt/docker/"$project"
 
 # SSH_PORT, SSH_HOST, SSH_USERNAME, SSH_KEY (private), Deploy key (public)
 
