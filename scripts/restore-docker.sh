@@ -71,6 +71,74 @@ fi
 
 DC=(docker compose -f "$COMPOSE")
 
+# New backups store the exact names. Resolve old logical names from saved Compose.
+if [[ -f "$BACKUP_DIR/.volume-map" ]]; then
+    VOLUME_MAP=$(cat "$BACKUP_DIR/.volume-map")
+    LEGACY_VOLUMES=0
+else
+    LEGACY_VOLUMES=1
+    SOURCE_COMPOSE="$BACKUP_DIR/$COMPOSE"
+    if [[ ! -f "$SOURCE_COMPOSE" ]]; then
+        echo "❌ Compose-файл в бэкапе не найден: $SOURCE_COMPOSE"
+        exit 1
+    fi
+    CONFIG_DC=(docker compose --project-directory "$PWD" -f "$SOURCE_COMPOSE")
+    if [[ -f "$BACKUP_DIR/.env" ]]; then
+        CONFIG_DC+=(--env-file "$BACKUP_DIR/.env")
+    fi
+    if ! RESOLVED_CONFIG=$("${CONFIG_DC[@]}" config); then
+        echo "❌ Не удалось прочитать конфигурацию Compose из бэкапа"
+        exit 1
+    fi
+    if ! VOLUME_MAP=$(printf '%s\n' "$RESOLVED_CONFIG" | awk '
+        function unquote(s) { gsub(/^[\042\047]|[\042\047]$/, "", s); return s }
+        function check() { if (key != "" && !named) exit 1 }
+        /^volumes:$/ { volumes = 1; next }
+        /^[^ ]/ { if (volumes) check(); volumes = 0; key = "" }
+        volumes && /^  [^ ]/ {
+            check(); key = $0; sub(/^  /, "", key); sub(/:$/, "", key)
+            key = unquote(key); named = 0
+        }
+        volumes && /^    name: / {
+            name = $0; sub(/^    name: /, "", name)
+            printf "%s\t%s\n", key, unquote(name); named = 1
+        }
+        END { if (volumes) check() }
+    '); then
+        echo "❌ Compose не вернул точные имена томов"
+        exit 1
+    fi
+fi
+
+# Validate every archive and its exact destination before any destructive action.
+declare -A VOLUME_NAMES=()
+while IFS=$'\t' read -r logical physical extra; do
+    [[ -z "$logical" && -z "$physical" ]] && continue
+    if [[ ! "$logical" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ || ! "$physical" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ || -n "$extra" ]]; then
+        echo "❌ Некорректная таблица имён томов"
+        exit 1
+    fi
+    if [[ "$LEGACY_VOLUMES" -eq 1 ]]; then
+        VOLUME_NAMES["$logical"]="$physical"
+    else
+        VOLUME_NAMES["$physical"]="$physical"
+    fi
+done <<< "$VOLUME_MAP"
+for file in "$BACKUP_DIR"/volume_*_backup.tar.gz; do
+    [[ -f "$file" ]] || continue
+    vol=$(basename "$file" .tar.gz)
+    vol=${vol#volume_}
+    vol=${vol%_backup}
+    if [[ ! "$vol" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ || -z "${VOLUME_NAMES[$vol]:-}" ]]; then
+        echo "❌ Нет точного имени для архива: $file"
+        exit 1
+    fi
+    if ! tar -tzf "$file" >/dev/null 2>&1 || tar -tzf "$file" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
+        echo "❌ Небезопасный или повреждённый архив: $file"
+        exit 1
+    fi
+done
+
 echo "Восстанавливаем из: $BACKUP_DIR"
 echo "Compose: $COMPOSE"
 echo "=================================================="
@@ -130,35 +198,31 @@ echo "→ Восстанавливаем Named Volumes:"
 
 for file in "$BACKUP_DIR"/volume_*_backup.tar.gz; do
     if [ -f "$file" ]; then
-        # Из имени файла достаём короткое имя volume (vw-data)
         vol=$(basename "$file" .tar.gz)
-        vol=${vol#volume_}          # убираем volume_
-        vol=${vol%_backup}          # убираем _backup
+        vol=${vol#volume_}
+        vol=${vol%_backup}
+        REAL_VOL=${VOLUME_NAMES[$vol]}
 
-        if [[ ! "$vol" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || ! tar -tzf "$file" >/dev/null 2>&1 || tar -tzf "$file" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
-            echo "   [!] Некорректный volume или архив; пропуск: $vol"
-            continue
-        fi
-
-        # Сначала ищем существующий volume с этим именем (с префиксом или без)
-        REAL_VOL=$(docker volume ls -q | awk -v vol="$vol" -v suffix="_$vol" '$0 == vol || substr($0, length($0)-length(suffix)+1) == suffix { print; exit }')
-
-        # Если не нашли — создаём с префиксом проекта
-        if [[ -z "$REAL_VOL" ]]; then
-            REAL_VOL="${PROJECT_NAME}_${vol}"
+        if ! docker volume inspect "$REAL_VOL" >/dev/null 2>&1; then
             echo "   • Создаём volume: $REAL_VOL"
-            docker volume create "$REAL_VOL" >/dev/null
+            if ! docker volume create "$REAL_VOL" >/dev/null; then
+                echo "❌ Не удалось создать том: $REAL_VOL"
+                exit 1
+            fi
         else
             echo "   • Используем существующий volume: $REAL_VOL"
         fi
 
         echo "   • Восстанавливаем $vol → $REAL_VOL"
 
-        docker run --rm \
+        if ! docker run --rm \
           -v "${REAL_VOL}:/data" \
           -v "$(pwd)/$BACKUP_DIR:/backup:ro" \
-          alpine sh -c 'find /data -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + && tar xzf "/backup/$1" -C /data' sh "$(basename "$file")" && \
-        echo "     ✓ Восстановлено" || echo "     [!] Ошибка восстановления $vol"
+          alpine sh -c 'find /data -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + && tar xzf "/backup/$1" -C /data' sh "$(basename "$file")"; then
+            echo "❌ Ошибка восстановления $REAL_VOL"
+            exit 1
+        fi
+        echo "     ✓ Восстановлено"
     fi
 done
 

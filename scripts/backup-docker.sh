@@ -35,6 +35,41 @@ fi
 
 DC=(docker compose -f "$COMPOSE")
 
+# Read physical names from normalized Compose output, never from suffix matches.
+if ! RESOLVED_CONFIG=$("${DC[@]}" config); then
+    echo "❌ Не удалось прочитать конфигурацию Compose"
+    exit 1
+fi
+if ! VOLUME_MAP=$(printf '%s\n' "$RESOLVED_CONFIG" | awk '
+    function unquote(s) { gsub(/^[\042\047]|[\042\047]$/, "", s); return s }
+    function check() { if (key != "" && !named) exit 1 }
+    /^volumes:$/ { volumes = 1; next }
+    /^[^ ]/ { if (volumes) check(); volumes = 0; key = "" }
+    volumes && /^  [^ ]/ {
+        check(); key = $0; sub(/^  /, "", key); sub(/:$/, "", key)
+        key = unquote(key); named = 0
+    }
+    volumes && /^    name: / {
+        name = $0; sub(/^    name: /, "", name)
+        printf "%s\t%s\n", key, unquote(name); named = 1
+    }
+    END { if (volumes) check() }
+'); then
+    echo "❌ Compose не вернул точные имена томов"
+    exit 1
+fi
+while IFS=$'\t' read -r vol real_vol; do
+    [[ -z "$vol" ]] && continue
+    if [[ ! "$vol" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ || ! "$real_vol" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+        echo "❌ Некорректное имя тома: $vol → $real_vol"
+        exit 1
+    fi
+    if ! docker volume inspect "$real_vol" >/dev/null; then
+        echo "❌ Исходный том не найден: $real_vol"
+        exit 1
+    fi
+done <<< "$VOLUME_MAP"
+
 mkdir -p "$BACKUP_DIR"
 echo "=== Полный Docker Backup ==="
 echo "Проект: $PROJECT_NAME"
@@ -74,28 +109,24 @@ echo "   Найдено bind mounts: $BIND_COUNT"
 # =============================================
 echo "→ Бэкапим Named Volumes:"
 VOLUME_COUNT=0
-for vol in $("${DC[@]}" config --volumes 2>/dev/null); do
+while IFS=$'\t' read -r vol REAL_VOL; do
     if [[ -n "$vol" ]]; then
-        if [[ ! "$vol" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
-            echo "     [!] Небезопасное имя volume; пропуск: $vol"
-            continue
-        fi
-        REAL_VOL=$(docker volume ls -q | awk -v vol="$vol" -v suffix="_$vol" '$0 == vol || substr($0, length($0)-length(suffix)+1) == suffix { print; exit }')
-        if [[ -z "$REAL_VOL" ]]; then
-            REAL_VOL="$vol"
-        fi
         VOLUME_COUNT=$((VOLUME_COUNT + 1))
         echo "   • Volume: $vol → $REAL_VOL"
-        BACKUP_FILE="$BACKUP_DIR/volume_${vol}_backup.tar.gz"
-        docker run --rm \
-          -v "${REAL_VOL}:/volume_data:ro" \
+        BACKUP_FILE="$BACKUP_DIR/volume_${REAL_VOL}_backup.tar.gz"
+        if ! docker run --rm \
+          --mount "type=volume,src=${REAL_VOL},dst=/volume_data,readonly" \
           -v "$(pwd)/$BACKUP_DIR:/backup" \
-          alpine tar czf "/backup/volume_${vol}_backup.tar.gz" -C /volume_data . || \
-          echo "     [!] Ошибка бэкапа $REAL_VOL"
+          alpine tar czf "/backup/volume_${REAL_VOL}_backup.tar.gz" -C /volume_data .; then
+            rm -f "$BACKUP_FILE"
+            echo "❌ Ошибка бэкапа $REAL_VOL"
+            exit 1
+        fi
         size=$(du -sh "$BACKUP_FILE" 2>/dev/null | awk '{print $1}' || echo "0")
         echo "     ✓ $size"
     fi
-done
+done <<< "$VOLUME_MAP"
+printf '%s\n' "$VOLUME_MAP" > "$BACKUP_DIR/.volume-map"
 if [ "$VOLUME_COUNT" -eq 0 ]; then
     echo "   Named volumes не найдены"
 else
