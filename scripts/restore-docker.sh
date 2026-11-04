@@ -83,6 +83,11 @@ selected() {
     return 1
 }
 fail() { echo "❌ $*" >&2; exit 1; }
+restore_tmp=''
+cleanup_restore_tmp() {
+    if [[ -n "$restore_tmp" ]]; then rm -rf -- "$restore_tmp"; restore_tmp=''; fi
+}
+trap cleanup_restore_tmp EXIT
 archive_safe() {
     local listing
     listing=$(tar -tzf "$1") || return 1
@@ -94,6 +99,48 @@ bind_destination_safe() {
     destination=$(realpath -m -- "$1") || return 1
     [[ "$destination" != / && "$BACKUP_ABS" != "$destination" && "$BACKUP_ABS" != "$destination/"* ]]
 }
+
+paths_overlap() {
+    local left right
+    left=$(realpath -m -- "$1") || fail "Не удалось проверить путь: $1"
+    right=$(realpath -m -- "$2") || fail "Не удалось проверить путь: $2"
+    [[ "$left" == / || "$right" == / || "$left" == "$right" || "$left/" == "$right/"* || "$right/" == "$left/"* ]]
+}
+find_running_consumers() {
+    local ids id records type source name extra file vol used
+    ids=$(docker ps --quiet) || fail 'Не удалось проверить работающие контейнеры'
+    for id in $ids; do
+        [[ "$id" =~ ^[a-f0-9]{12,64}$ ]] || fail 'Некорректный ID контейнера'
+        records=$(docker container inspect --format "$RUNNING_MOUNTS_TEMPLATE" "$id") || fail "Не удалось проверить mounts контейнера: $id"
+        while IFS=$'\t' read -r type source name extra; do
+            [[ -n "$type" ]] || continue
+            [[ -n "$source" && -n "$name" && -z "$extra" ]] || fail 'Некорректное описание mount'
+            used=0
+            if [[ "$type" == volume ]]; then
+                for file in "${VOLUME_FILES[@]}"; do
+                    selected "volume:$file" || continue
+                    vol=${file##*/}; vol=${vol#volume_}; vol=${vol%_backup.tar.gz}
+                    [[ "${VOLUME_NAMES[$vol]}" != "$source" ]] || used=1
+                done
+            elif [[ "$type" == bind ]]; then
+                for file in "${BIND_FILES[@]}"; do
+                    selected "bind:$file" || continue
+                    paths_overlap "${BIND_PATHS[${file##*/}]}" "$source" && used=1
+                done
+            fi
+            if [[ "$used" -eq 1 ]]; then
+                printf '%s\t%s\n' "$id" "$name"
+                break
+            fi
+        done <<< "$records"
+    done
+}
+require_stopped_destinations() {
+    local remaining
+    remaining=$(find_running_consumers) || fail 'Не удалось повторно проверить потребителей данных'
+    [[ -z "$remaining" ]] || fail 'Данные всё ещё использует работающий контейнер; запись не начата'
+}
+RUNNING_MOUNTS_TEMPLATE='{{if .State.Running}}{{range .Mounts}}{{if eq .Type "volume"}}{{printf "volume\t%s\t%s\n" .Name $.Name}}{{else if eq .Type "bind"}}{{printf "bind\t%s\t%s\n" .Source $.Name}}{{end}}{{end}}{{end}}'
 
 BACKUP_ROOT='./backups'
 PROJECT_NAME=$(basename "$PWD")
@@ -226,6 +273,11 @@ reason=''; [[ -f "$BACKUP_DIR/$COMPOSE" ]] || reason='файл отсутств�
 add_item compose "Конфиг: $COMPOSE" "$reason"
 reason=''; [[ -f "$BACKUP_DIR/.env" ]] || reason='файл отсутствует в бэкапе'
 add_item env 'Конфиг: .env' "$reason"
+for file in "$BACKUP_DIR"/container_*.inspect.json; do
+    [[ -f "$file" ]] || continue
+    name=${file##*/}; name=${name#container_}; name=${name%.inspect.json}
+    add_item "container:$file" "Описание контейнера: $name" 'справочный inspect; контейнер пересоздаёт его управляющий сервис или оператор'
+done
 
 if ! select_items 'Выберите, что восстановить'; then echo 'Восстановление отменено.'; exit 0; fi
 echo 'Будет восстановлено:'
@@ -233,10 +285,22 @@ for ((i=0; i<${#ITEM_KEYS[@]}; i++)); do
     [[ "${ITEM_SELECTED[i]}" -eq 0 ]] || printf '  • %s\n' "${ITEM_LABELS[i]}"
 done
 DATA_SELECTED=0
+CONSUMER_IDS=()
 for file in "${VOLUME_FILES[@]}"; do selected "volume:$file" && DATA_SELECTED=1; done
 for file in "${BIND_FILES[@]}"; do selected "bind:$file" && DATA_SELECTED=1; done
 if [[ "$DATA_SELECTED" -eq 1 ]]; then
-    echo 'Выбранные данные будут заменены. Контейнеры будут остановлены и останутся остановленными.'
+    echo 'Выбранные данные будут заменены. Compose и контейнеры-потребители будут остановлены и останутся остановленными.'
+    echo 'До подтверждения остановите внешние управляющие сервисы и процессы хоста, которые могут записывать эти данные.'
+    echo 'Не запускайте потребителей до окончания восстановления; проверка mounts не блокирует их запуск.'
+    CONSUMERS=$(find_running_consumers) || fail 'Не удалось определить потребителей выбранных данных'
+    if [[ -n "$CONSUMERS" ]]; then
+        echo 'Дополнительная остановка контейнеров, использующих выбранные данные:'
+        while IFS=$'\t' read -r id name; do
+            [[ -n "$id" ]] || continue
+            CONSUMER_IDS+=("$id")
+            printf '  • %s (%s)\n' "$name" "$id"
+        done <<< "$CONSUMERS"
+    fi
     # Validate selected archives again before stopping containers.
     for file in "${VOLUME_FILES[@]}"; do
         selected "volume:$file" || continue
@@ -260,6 +324,10 @@ if [[ "$DATA_SELECTED" -eq 1 ]]; then
         [[ ! -f "$BACKUP_DIR/.env" ]] || STOP_DC+=(--env-file "$BACKUP_DIR/.env")
     fi
     "${STOP_DC[@]}" stop || fail 'Не удалось остановить контейнеры; данные не изменены'
+    if [[ ${#CONSUMER_IDS[@]} -gt 0 ]]; then
+        docker stop "${CONSUMER_IDS[@]}" || fail 'Не удалось остановить потребителей; данные не изменены'
+    fi
+    require_stopped_destinations
 fi
 for file in "${BIND_FILES[@]}"; do
     selected "bind:$file" || continue
@@ -267,19 +335,20 @@ for file in "${BIND_FILES[@]}"; do
     bind_destination_safe "$destination" || fail "Путь стал небезопасным: $destination"
     restore_tmp=$(mktemp -d) || fail 'Не удалось создать временную папку'
     if ! tar -xzf "$file" -C "$restore_tmp"; then
-        rm -rf "$restore_tmp"; fail "Ошибка распаковки: $file"
+        cleanup_restore_tmp; fail "Ошибка распаковки: $file"
     fi
     folder=${file##*/}; folder=${folder#bind_}; folder=${folder%.tar.gz}
     if [[ ! -e "$restore_tmp/$folder" || -L "$restore_tmp/$folder" ]]; then
-        rm -rf "$restore_tmp"; fail "Архив не содержит ожидаемый путь: $folder"
+        cleanup_restore_tmp; fail "Архив не содержит ожидаемый путь: $folder"
     fi
+    require_stopped_destinations
     if [[ -d "$restore_tmp/$folder" ]]; then
         mkdir -p "$destination" && find "$destination" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + && cp -a "$restore_tmp/$folder/." "$destination/" || fail "Ошибка восстановления: $destination"
     else
         [[ ! -d "$destination" ]] || fail "Ожидался файл, но найдена папка: $destination"
         mkdir -p "$(dirname "$destination")" && cp -a "$restore_tmp/$folder" "$destination" || fail "Ошибка восстановления: $destination"
     fi
-    rm -rf "$restore_tmp"
+    cleanup_restore_tmp
     echo "✓ Bind: $destination"
 done
 for file in "${VOLUME_FILES[@]}"; do
@@ -289,6 +358,7 @@ for file in "${VOLUME_FILES[@]}"; do
     if ! docker volume inspect "$REAL_VOL" >/dev/null 2>&1; then
         docker volume create "$REAL_VOL" >/dev/null || fail "Не удалось создать том: $REAL_VOL"
     fi
+    require_stopped_destinations
     docker run --rm -v "${REAL_VOL}:/data" -v "$PWD/$BACKUP_DIR:/backup:ro" alpine sh -c \
         'find /data -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + && tar xzf "/backup/$1" -C /data' sh "${file##*/}" || fail "Ошибка восстановления: $REAL_VOL"
     echo "✓ Том: $REAL_VOL"
